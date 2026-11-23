@@ -395,9 +395,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            t!("Welcome back to Wu")
+            t!("Welcome back to Wu Plus")
         } else {
-            t!("Welcome to Wu")
+            t!("Welcome to Wu Plus")
         };
 
         h_flex()

@@ -15884,6 +15884,7 @@ dependencies = [
  "system_specs",
  "tab_switcher",
  "tabular_data_preview",
+ "task",
  "tasks_ui",
  "tempfile",
  "terminal_view",

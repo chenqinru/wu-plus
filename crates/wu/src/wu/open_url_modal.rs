@@ -28,7 +28,7 @@ impl OpenUrlModal {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("wu://...", window, cx);
+            editor.set_placeholder_text("wu-plus://...", window, cx);
             editor
         });
 
@@ -54,8 +54,8 @@ impl OpenUrlModal {
             return;
         }
 
-        // Handle wu:// URLs internally.
-        if url.starts_with("wu://") || url.starts_with("wu-cli://") {
+        // Keep legacy Wu links available when opened from inside Wu Plus.
+        if url.starts_with("wu-plus://") || url.starts_with("wu://") || url.starts_with("wu-cli://") {
             OpenListener::global(cx).open(RawOpenRequest {
                 urls: vec![url],
                 ..Default::default()

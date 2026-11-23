@@ -131,6 +131,11 @@ impl OpenRequest {
         }
 
         for url in request.urls {
+            let url = if let Some(suffix) = url.strip_prefix("wu-plus://") {
+                format!("wu://{suffix}")
+            } else {
+                url
+            };
             if let Some(server_name) = url.strip_prefix("wu-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {

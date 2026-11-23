@@ -27,7 +27,7 @@ const CANT_INSTALL_DOCS_URL: &str =
 /// commonly because the user is not an admin.
 async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
     let cli_path = cx.update(|cx| cx.path_for_auxiliary_executable("cli"))?;
-    let link_path = Path::new("/usr/local/bin/wu");
+    let link_path = Path::new("/usr/local/bin/wu-plus");
     let bin_dir_path = link_path.parent().unwrap();
 
     // Don't re-create symlink if it points to the same CLI binary.
@@ -100,7 +100,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
             // The user dismissed the administrator prompt; nothing to do.
             Ok(None) => return Ok(()),
             Err(error) => {
-                log::error!("failed to install wu CLI: {error:#}");
+                log::error!("failed to install wu-plus CLI: {error:#}");
                 workspace.update(cx, |workspace, cx| {
                     struct CliInstallFailed;
 
@@ -110,10 +110,10 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                         |cx| {
                             cx.new(|cx| {
                                 MessageNotification::new(
-                                    t!("You can add `wu` to your PATH manually."),
+                                    t!("You can add `wu-plus` to your PATH manually."),
                                     cx,
                                 )
-                                .with_title(t!("Couldn't install the Wu CLI"))
+                                .with_title(t!("Couldn't install the Wu Plus CLI"))
                                 .more_info_message(t!("Show me how"))
                                 .more_info_url(CANT_INSTALL_DOCS_URL)
                             })
@@ -131,7 +131,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 Toast::new(
                     NotificationId::unique::<InstalledZedCli>(),
                     t!(
-                        "Installed `wu` to {path}. You can launch {app} from your terminal.",
+                        "Installed `wu-plus` to {path}. You can launch {app} from your terminal.",
                         path = path.to_string_lossy(),
                         app = ReleaseChannel::global(cx).display_name()
                     )
@@ -143,5 +143,5 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
         register_wu_scheme(cx).await.log_err();
         Ok(())
     })
-    .detach_and_prompt_err(&t!("Cannot install the Wu CLI"), window, cx, |_, _, _| None);
+    .detach_and_prompt_err(&t!("Cannot install the Wu Plus CLI"), window, cx, |_, _, _| None);
 }

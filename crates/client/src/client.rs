@@ -689,7 +689,7 @@ impl ProtoClient for Client {
 }
 
 /// prefix for the wu:// url scheme
-pub const ZED_URL_SCHEME: &str = "wu";
+pub const ZED_URL_SCHEME: &str = "wu-plus";
 
 #[cfg(test)]
 mod tests {

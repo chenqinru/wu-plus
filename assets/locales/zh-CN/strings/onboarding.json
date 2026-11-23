@@ -25,7 +25,7 @@
   "The editor that doesn't get in your way": "不打扰你的编辑器",
   "Theme": "主题",
   "Trust All Projects By Default": "默认信任所有项目",
-  "Welcome to Wu": "欢迎使用 Wu",
+  "Welcome to Wu Plus": "欢迎使用 Wu Plus",
   "Wu can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.": "只有在你将新项目标记为受信任后，Wu 才会允许语言服务器、项目设置和 MCP 服务器等服务运行。",
   "Your {source} settings were successfully imported.": "已成功导入你的 {source} 设置。"
 }

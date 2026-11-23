@@ -31,7 +31,7 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["wu://", "http://", "https://", "file://", "ssh://"];
+const URL_PREFIX: [&'static str; 6] = ["wu-plus://", "wu://", "http://", "https://", "file://", "ssh://"];
 
 struct Detect;
 
@@ -48,21 +48,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "wu",
+    name = "wu-plus",
     disable_version_flag = true,
-    before_help = "The Wu CLI binary.
-This CLI is a separate binary that invokes Wu.
+    before_help = "The Wu Plus CLI binary.
+This CLI is a separate binary that invokes Wu Plus.
 
 Examples:
-    `wu`
-          Simply opens Wu
-    `wu --foreground`
+    `wu-plus`
+          Simply opens Wu Plus
+    `wu-plus --foreground`
           Runs in foreground (shows all logs)
-    `wu path-to-your-project`
-          Open your project in Wu
-    `wu -n path-to-file `
+    `wu-plus path-to-your-project`
+          Open your project in Wu Plus
+    `wu-plus -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | wu -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | wu-plus -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -87,7 +87,7 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Wu`.")]
+    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Wu Plus`.")]
     #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Wu`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
@@ -106,7 +106,7 @@ struct Args {
     /// Run wu in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Wu.app or the wu binary
+    /// Custom path to Wu Plus.app or the wu binary
     #[arg(long)]
     zed: Option<PathBuf>,
     /// Run wu in dev-server mode
@@ -842,14 +842,14 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let items = [
         format!(
             "Add to existing Wu window ({})",
-            blue.apply_to("wu --existing")
+            blue.apply_to("wu-plus --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("wu --classic")),
+        format!("Open a new window ({})", blue.apply_to("wu-plus --classic")),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("wu <path>"),
+        blue.apply_to("wu-plus <path>"),
         console::style("You can change this later in Wu settings"),
     );
 
@@ -1388,7 +1388,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Wu {} – {}", self.version(), self.path().display(),)
+            format!("Wu Plus {} – {}", self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
