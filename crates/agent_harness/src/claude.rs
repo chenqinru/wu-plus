@@ -172,13 +172,16 @@ impl ClaudeHarness {
             "--verbose",
             "--include-partial-messages",
             "--replay-user-messages",
-            // Newer models emit no thinking text unless a summary is requested.
-            "--thinking-display",
-            "summarized",
             // Undocumented: routes `can_use_tool` requests to the stdio control channel.
             "--permission-prompt-tool",
             "stdio",
         ]);
+        if !request.ephemeral {
+            // An interactive session displays reasoning summaries. Short-lived
+            // commit-message requests only consume the final text and work
+            // with Claude versions that do not recognize this option.
+            cmd.args(["--thinking-display", "summarized"]);
+        }
         if let Some(model) = &request.model {
             cmd.arg("--model");
             cmd.arg(model_argument_for(

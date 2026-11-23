@@ -1243,12 +1243,73 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_item_with_replacement(
+            item,
+            activate_pane,
+            focus_item,
+            activate,
+            destination_index,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Activates the new preview in the old tab's slot before removing the old
+    /// item, so closing it cannot activate or scroll to a neighbouring tab.
+    pub fn add_preview_item(
+        &mut self,
+        item: Box<dyn ItemHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new_id = item.item_id();
+        if !PreviewTabsSettings::get_global(cx).enabled || self.index_for_item_id(new_id).is_some()
+        {
+            self.add_item(item, false, true, None, window, cx);
+            return;
+        }
+
+        if let Some(preview) = self.preview_item()
+            && (preview.is_dirty(cx) || preview.confirm_close(cx).is_some())
+        {
+            self.unpreview_item_if_preview(preview.item_id());
+        }
+        let destination = self.preview_item_idx();
+        let replacement = self.preview_item_id();
+        self.set_preview_item_id(None, cx);
+        self.add_item_with_replacement(
+            item,
+            false,
+            true,
+            true,
+            destination,
+            replacement,
+            window,
+            cx,
+        );
+        if self.index_for_item_id(new_id).is_some() {
+            self.set_preview_item_id(Some(new_id), cx);
+        }
+    }
+
+    fn add_item_with_replacement(
+        &mut self,
+        item: Box<dyn ItemHandle>,
+        activate_pane: bool,
+        focus_item: bool,
+        activate: bool,
+        destination_index: Option<usize>,
+        replacement: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let item_already_exists = self
             .items
             .iter()
             .any(|existing_item| existing_item.item_id() == item.item_id());
 
-        if !item_already_exists {
+        if !item_already_exists && replacement.is_none() {
             self.close_items_on_item_open(window, cx);
         }
 
@@ -1351,6 +1412,9 @@ impl Pane {
         }
 
         cx.emit(Event::AddItem { item });
+        if let Some(replacement) = replacement {
+            self.remove_item(replacement, false, false, window, cx);
+        }
     }
 
     pub fn add_item(

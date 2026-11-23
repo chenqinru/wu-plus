@@ -20,6 +20,7 @@ pub struct ProjectPanelSettings {
     pub file_icons: bool,
     pub folder_indicator: FolderIndicator,
     pub git_status: bool,
+    pub show_version_control_status: bool,
     pub indent_size: f32,
     pub indent_guides: IndentGuidesSettings,
     pub sticky_scroll: bool,
@@ -106,6 +107,7 @@ impl Settings for ProjectPanelSettings {
             entry_spacing: project_panel.entry_spacing.unwrap(),
             file_icons: project_panel.file_icons.unwrap(),
             folder_indicator: project_panel.folder_indicator.unwrap(),
+            show_version_control_status: project_panel.git_status.unwrap(),
             git_status: project_panel.git_status.unwrap()
                 && content
                     .git

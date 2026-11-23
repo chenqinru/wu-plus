@@ -5,8 +5,8 @@ use editor::{
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
 };
 use gpui::{
-    App, Context, Entity, InteractiveElement as _, ParentElement as _, Subscription, Task,
-    WeakEntity,
+    App, Context, Entity, InteractiveElement as _, ParentElement as _, SharedString, Subscription,
+    Task, WeakEntity,
 };
 use i18n::t;
 use language::{Anchor, Buffer, BufferId};
@@ -23,6 +23,7 @@ struct BufferConflicts {
     block_ids: Vec<(Range<Anchor>, CustomBlockId)>,
     conflict_set: Entity<ConflictSet>,
     _subscription: Subscription,
+    external_edits: Option<Subscription>,
 }
 
 impl editor::Addon for ConflictAddon {
@@ -36,6 +37,9 @@ impl editor::Addon for ConflictAddon {
 }
 
 pub fn register_editor(editor: &mut Editor, buffer: Entity<MultiBuffer>, cx: &mut Context<Editor>) {
+    if editor.addon::<ConflictAddon>().is_some() {
+        return;
+    }
     let is_singleton = editor.buffer().read(cx).is_singleton();
     if !editor.mode().is_full()
         || (!is_singleton && !editor.buffer().read(cx).all_diff_hunks_expanded())
@@ -54,6 +58,83 @@ pub fn register_editor(editor: &mut Editor, buffer: Entity<MultiBuffer>, cx: &mu
             open_conflict_set_for_buffer(editor, buffer, cx);
         }
     }
+}
+
+/// Markers supplied by another version control provider use the same editor
+/// actions as Git. The provider still owns the working-copy resolution.
+pub fn attach_conflict_markers(
+    editor: &mut Editor,
+    buffer: Entity<Buffer>,
+    ours: SharedString,
+    theirs: SharedString,
+    cx: &mut Context<Editor>,
+) -> Entity<ConflictSet> {
+    if editor.addon::<ConflictAddon>().is_none() {
+        editor.register_addon(ConflictAddon {
+            buffers: Default::default(),
+        });
+    }
+    let id = buffer.read(cx).remote_id();
+    if let Some(previous) = editor
+        .addon::<ConflictAddon>()
+        .and_then(|addon| addon.buffers.get(&id))
+    {
+        let previous_set = previous.conflict_set.clone();
+        let old_range = 0..previous.block_ids.len();
+        conflicts_updated(
+            editor,
+            previous_set,
+            &ConflictSetUpdate {
+                buffer_range: None,
+                old_range,
+                new_range: 0..0,
+            },
+            cx,
+        );
+        if let Some(addon) = editor.addon_mut::<ConflictAddon>() {
+            addon.buffers.remove(&id);
+        }
+    }
+    let set = cx.new(|cx| ConflictSet::new(id, true, cx));
+    let parse = move |buffer: &Buffer| {
+        let snapshot = buffer.text_snapshot();
+        let mut conflicts = ConflictSet::parse(&snapshot);
+        for conflict in Arc::make_mut(&mut conflicts.conflicts) {
+            conflict.ours_branch_name = ours.clone();
+            conflict.theirs_branch_name = theirs.clone();
+        }
+        (snapshot, conflicts)
+    };
+    let (snapshot, parsed) = parse(buffer.read(cx));
+    set.update(cx, |set, cx| {
+        let change = set.snapshot.compare(&parsed, &snapshot);
+        set.set_snapshot(parsed, change, cx);
+    });
+    buffer_ranges_updated(editor, set.clone(), cx);
+    let edits = cx.subscribe(&buffer, {
+        let set = set.clone();
+        move |_, buffer, event, cx| {
+            if matches!(
+                event,
+                language::BufferEvent::Edited { .. } | language::BufferEvent::Reloaded
+            ) {
+                let (snapshot, parsed) = parse(buffer.read(cx));
+                set.update(cx, |set, cx| {
+                    let change = set.snapshot.compare(&parsed, &snapshot);
+                    if !change.old_range.is_empty() || !change.new_range.is_empty() {
+                        set.set_snapshot(parsed, change, cx);
+                    }
+                });
+            }
+        }
+    });
+    if let Some(state) = editor
+        .addon_mut::<ConflictAddon>()
+        .and_then(|addon| addon.buffers.get_mut(&id))
+    {
+        state.external_edits = Some(edits);
+    }
+    set
 }
 
 fn open_conflict_set_for_buffer(
@@ -110,12 +191,20 @@ pub(crate) fn buffer_ranges_updated(
     let Some(conflict_addon) = editor.addon_mut::<ConflictAddon>() else {
         return;
     };
+    if conflict_addon
+        .buffers
+        .get(&buffer_id)
+        .is_some_and(|state| state.external_edits.is_some() && state.conflict_set != conflict_set)
+    {
+        return;
+    }
     let buffer_conflicts = conflict_addon.buffers.entry(buffer_id).or_insert_with(|| {
         let subscription = cx.subscribe(&conflict_set, conflicts_updated);
         BufferConflicts {
             block_ids: Vec::new(),
             conflict_set: conflict_set.clone(),
             _subscription: subscription,
+            external_edits: None,
         }
     });
 

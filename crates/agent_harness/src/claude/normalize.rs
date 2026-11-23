@@ -741,7 +741,7 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
-                let done = if f.subtype == "success" {
+                let done = if f.subtype == "success" && !f.is_error {
                     AgentEvent::Done {
                         status: if interrupted {
                             DoneStatus::Interrupted
@@ -777,6 +777,7 @@ impl Normalizer {
                                 Some(result_error_text(&f.subtype).to_string())
                             }
                             _ if !diagnostics.is_empty() => None,
+                            "success" => f.result,
                             _ => Some(result_error_text(&f.subtype).to_string()),
                         }
                     };
@@ -1550,6 +1551,16 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn service_error_marked_as_success_is_not_output() {
+        let done = result_done(
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 402"}"#,
+        );
+        assert!(matches!(done, AgentEvent::Done {
+            status: DoneStatus::Errored, result: None, error: Some(error), ..
+        } if error == "API Error: 402"));
     }
 
     #[test]

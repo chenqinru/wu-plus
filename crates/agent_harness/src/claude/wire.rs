@@ -171,6 +171,8 @@ pub(crate) struct ResultFrame {
     #[serde(default)]
     pub subtype: String,
     #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
     pub result: Option<String>,
     #[serde(default)]
     pub errors: Vec<Value>,

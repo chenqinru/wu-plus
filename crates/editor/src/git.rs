@@ -290,7 +290,8 @@ impl Editor {
     }
 
     pub fn active_git_blame_entry(&self, cx: &mut App) -> Option<BlameEntry> {
-        if !self.show_git_blame_inline
+        if self.external_blame_loader.is_some()
+            || !self.show_git_blame_inline
             || self.newest_selection_head_on_empty_line(cx)
             || !self.has_blame_entries(cx)
         {
@@ -1134,11 +1135,7 @@ impl Editor {
     ) {
         self.start_git_blame(user_triggered, window, cx);
 
-        if ProjectSettings::get_global(cx)
-            .git
-            .inline_blame_delay()
-            .is_some()
-        {
+        if self.inline_blame_delay(cx).is_some() {
             self.start_inline_blame_timer(window, cx);
         } else {
             self.show_git_blame_inline = true
@@ -1150,8 +1147,7 @@ impl Editor {
     }
 
     pub(super) fn render_git_blame_inline(&self, window: &Window, cx: &App) -> bool {
-        ProjectSettings::get_global(cx).git.inline_blame.location
-            == project::project_settings::InlineBlameLocation::Inline
+        self.inline_blame_in_editor(cx)
             && self.show_git_blame_inline
             && (self.focus_handle.is_focused(window) || self.inline_blame_popover.is_some())
             && !self.newest_selection_head_on_empty_line(cx)
@@ -1159,7 +1155,7 @@ impl Editor {
     }
 
     pub(super) fn start_inline_blame_timer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(delay) = ProjectSettings::get_global(cx).git.inline_blame_delay() {
+        if let Some(delay) = self.inline_blame_delay(cx) {
             self.show_git_blame_inline = false;
 
             self.show_git_blame_inline_delay_task =
@@ -1173,6 +1169,65 @@ impl Editor {
                     .log_err();
                 }));
         }
+    }
+
+    fn inline_blame_delay(&self, cx: &App) -> Option<Duration> {
+        if self.external_blame_loader.is_some() {
+            None
+        } else {
+            ProjectSettings::get_global(cx).git.inline_blame_delay()
+        }
+    }
+
+    pub(super) fn inline_blame_in_editor(&self, cx: &App) -> bool {
+        self.external_blame_loader.is_some()
+            || ProjectSettings::get_global(cx).git.inline_blame.location
+                == project::project_settings::InlineBlameLocation::Inline
+    }
+
+    pub(super) fn show_version_control_gutter(&self, cx: &App) -> bool {
+        self.svn_settings
+            .map(|svn| svn.show_change_markers)
+            .or(self.show_git_diff_gutter)
+            .unwrap_or_else(|| {
+                matches!(
+                    ProjectSettings::get_global(cx).git.git_gutter,
+                    GitGutterSetting::TrackedFiles
+                )
+            })
+    }
+
+    pub(super) fn show_version_control_scrollbar_marks(&self, cx: &App) -> bool {
+        self.svn_settings
+            .map(|svn| svn.show_change_markers)
+            .unwrap_or_else(|| EditorSettings::get_global(cx).scrollbar.git_diff)
+    }
+
+    pub(super) fn apply_svn_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = ProjectSettings::get_global(cx).svn;
+        let previous = self.svn_settings.replace(settings);
+        if previous.is_none_or(|previous| previous.show_change_markers != settings.show_change_markers)
+        {
+            self.scrollbar_marker_state.pending_refresh = None;
+            self.scrollbar_marker_state.dirty = true;
+        }
+        let inline_changed =
+            previous.is_none_or(|previous| previous.inline_blame != settings.inline_blame);
+        let gutter_changed =
+            previous.is_none_or(|previous| previous.blame_gutter != settings.blame_gutter);
+        if inline_changed {
+            self.git_blame_inline_enabled = settings.inline_blame;
+            self.show_git_blame_inline = settings.inline_blame;
+        }
+        if gutter_changed {
+            self.show_git_blame_gutter = settings.blame_gutter;
+        }
+        if (inline_changed && settings.inline_blame || gutter_changed && settings.blame_gutter)
+            && !self.has_blame_entries(cx)
+        {
+            self.start_git_blame(false, window, cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn show_blame_popover(
@@ -1303,6 +1358,46 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn set_external_blame_loader(
+        &mut self,
+        loader: Option<std::rc::Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.blame = None;
+        self.blame_subscription = None;
+        self.show_git_blame_inline_delay_task.take();
+        self.hide_blame_popover(true, cx);
+        self.external_blame_loader = loader;
+        if self.external_blame_loader.is_some() {
+            self.apply_svn_settings(window, cx);
+        } else {
+            self.svn_settings = None;
+            self.scrollbar_marker_state.pending_refresh = None;
+            self.scrollbar_marker_state.dirty = true;
+            self.show_git_blame_gutter = false;
+            self.show_git_blame_inline = false;
+            self.git_blame_inline_enabled = ProjectSettings::get_global(cx).git.inline_blame.enabled;
+            if self.git_blame_inline_enabled {
+                self.start_git_blame_inline(false, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn set_external_blame(
+        &mut self,
+        blame: Entity<GitBlame>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.external_blame_loader.is_some() {
+            self.blame_subscription = Some(cx.observe_in(&blame, window, |_, _, _, cx| cx.notify()));
+            self.blame = Some(blame);
+            cx.notify();
+        }
+    }
+
     fn start_git_blame(
         &mut self,
         user_triggered: bool,
@@ -1314,6 +1409,10 @@ impl Editor {
             .as_ref()
             .is_some_and(|blame| blame.read(cx).is_static())
         {
+            return;
+        }
+        if let Some(loader) = self.external_blame_loader.clone() {
+            loader(user_triggered, window, cx);
             return;
         }
         if let Some(project) = self.project() {

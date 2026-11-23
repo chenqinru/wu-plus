@@ -19,6 +19,7 @@ use std::{
     any::{Any, TypeId},
     path::PathBuf,
     pin::pin,
+    rc::Rc,
     sync::Arc,
     time::Duration,
 };
@@ -34,6 +35,8 @@ use workspace::{
 pub struct FileDiffView {
     editor: Entity<SplittableEditor>,
     old_buffer: Entity<Buffer>,
+    snapshot_labels: Option<[String; 3]>,
+    snapshot_action: Option<(SharedString, Rc<dyn Fn(&mut Window, &mut App)>)>,
     new_buffer: Entity<Buffer>,
     buffer_changes_tx: watch::Sender<()>,
     _recalculate_diff_task: Task<Result<()>>,
@@ -182,6 +185,8 @@ impl FileDiffView {
             editor,
             buffer_changes_tx,
             old_buffer,
+            snapshot_labels: None,
+            snapshot_action: None,
             new_buffer,
             _recalculate_diff_task: cx.spawn(async move |this, cx| {
                 while buffer_changes_rx.recv().await.is_ok() {
@@ -217,6 +222,37 @@ impl FileDiffView {
                 Ok(())
             }),
         }
+    }
+
+    /// Name the two sides of a comparison built from read-only snapshots.
+    pub fn with_snapshot_labels(
+        mut self,
+        title: String,
+        old_label: String,
+        new_label: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let header = format!("{title} · {old_label} ↔ {new_label}");
+        self.editor.update(cx, |editor, cx| {
+            editor.rhs_editor().update(cx, |editor, _| {
+                editor.set_breadcrumb_header(header);
+            });
+        });
+        self.snapshot_labels = Some([title, old_label, new_label]);
+        self
+    }
+
+    pub fn with_snapshot_action(
+        mut self,
+        label: SharedString,
+        action: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.snapshot_action = Some((label, Rc::new(action)));
+        self
+    }
+
+    pub fn rhs_editor(&self, cx: &App) -> Entity<Editor> {
+        self.editor.read(cx).rhs_editor().clone()
     }
 }
 
@@ -269,6 +305,9 @@ impl Item for FileDiffView {
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        if let Some([title, ..]) = &self.snapshot_labels {
+            return title.clone().into();
+        }
         let title_text = |buffer: &Entity<Buffer>| {
             buffer
                 .read(cx)
@@ -290,6 +329,9 @@ impl Item for FileDiffView {
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<ui::SharedString> {
+        if let Some([title, old_label, new_label]) = &self.snapshot_labels {
+            return Some(format!("{title} · {old_label} ↔ {new_label}").into());
+        }
         let path = |buffer: &Entity<Buffer>| {
             buffer
                 .read(cx)
@@ -387,6 +429,10 @@ impl Item for FileDiffView {
         });
     }
 
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.snapshot_labels.is_some() && self.editor.read(cx).rhs_editor().read(cx).is_dirty(cx)
+    }
+
     fn can_save(&self, cx: &App) -> bool {
         self.editor.read(cx).rhs_editor().read(cx).can_save(cx)
     }
@@ -449,12 +495,52 @@ impl Render for FileDiffStyleToolbar {
             return Empty.into_any_element();
         };
 
-        let editor = file_diff.read(cx).editor.clone();
+        let file_diff = file_diff.read(cx);
+        let editor = file_diff.editor.clone();
+        let rhs = editor.read(cx).rhs_editor().clone();
 
         h_flex()
             .pl_0p5()
             .gap_1()
             .child(DiffStyleControls::new(editor))
+            .when_some(file_diff.snapshot_action.clone(), |toolbar, (label, action)| {
+                toolbar.child(
+                    Button::new("snapshot-details", label)
+                        .size(ButtonSize::Compact)
+                        .on_click(move |_, window, cx| action(window, cx)),
+                )
+            })
+            .when(file_diff.snapshot_labels.is_some(), |toolbar| {
+                toolbar.children(
+                    [
+                        (
+                            "previous-hunk",
+                            IconName::ArrowUp,
+                            t!("Previous Hunk"),
+                            "editor::GoToPreviousHunk",
+                        ),
+                        (
+                            "next-hunk",
+                            IconName::ArrowDown,
+                            t!("Next Hunk"),
+                            "editor::GoToHunk",
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(id, icon, label, action)| {
+                        let rhs = rhs.clone();
+                        IconButton::new(id, icon)
+                            .icon_size(IconSize::Small)
+                            .tooltip(ui::Tooltip::text(label))
+                            .on_click(move |_, window, cx| {
+                                rhs.focus_handle(cx).focus(window, cx);
+                                if let Ok(action) = cx.build_action(action, None) {
+                                    window.dispatch_action(action, cx);
+                                }
+                            })
+                    }),
+                )
+            })
             .into_any_element()
     }
 }

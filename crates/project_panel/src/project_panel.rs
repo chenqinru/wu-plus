@@ -5,7 +5,7 @@ mod utils;
 
 use anyhow::{Context as _, Result};
 use client::{ErrorCode, ErrorExt};
-use collections::{BTreeSet, HashMap, hash_map};
+use collections::{BTreeMap, BTreeSet, HashMap, hash_map};
 use editor::{
     Editor, EditorEvent, MultiBufferOffset,
     items::{
@@ -169,6 +169,7 @@ pub struct ProjectPanel {
     workspace: WeakEntity<Workspace>,
     diagnostics: HashMap<(WorktreeId, Arc<RelPath>), DiagnosticSeverity>,
     diagnostic_counts: HashMap<(WorktreeId, Arc<RelPath>), DiagnosticCount>,
+    external_statuses: BTreeMap<PathBuf, GitSummary>,
     diagnostic_summary_update: Task<()>,
     // We keep track of the mouse down state on entries so we don't flash the UI
     // in case a user clicks to open a file.
@@ -738,6 +739,18 @@ enum RemovalKind {
 }
 
 impl ProjectPanel {
+    /// Supplies file and directory decorations from a provider outside the Git store.
+    pub fn set_external_statuses(
+        &mut self,
+        statuses: BTreeMap<PathBuf, GitSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.external_statuses != statuses {
+            self.external_statuses = statuses;
+            cx.notify();
+        }
+    }
+
     fn new(
         workspace: &mut Workspace,
         window: &mut Window,
@@ -933,6 +946,7 @@ impl ProjectPanel {
                 workspace: workspace.weak_handle(),
                 diagnostics: Default::default(),
                 diagnostic_counts: Default::default(),
+                external_statuses: Default::default(),
                 diagnostic_summary_update: Task::ready(()),
                 scroll_handle,
                 mouse_down: false,
@@ -7383,8 +7397,22 @@ impl ProjectPanel {
         let reserves_chevron_slot =
             chevron.is_none() && folder_indicator.shows_chevron() && folder_indicator.shows_icon();
 
-        let filename_text_color =
-            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+        let status = if git_status == GitSummary::UNCHANGED
+            && ProjectPanelSettings::get_global(cx).show_version_control_status
+            && !self.external_statuses.is_empty()
+        {
+            self.project
+                .read(cx)
+                .worktree_for_id(worktree_id, cx)
+                .and_then(|tree| {
+                    let path = tree.read(cx).absolutize(&entry.path);
+                    self.external_statuses.get(&path).copied()
+                })
+                .unwrap_or_default()
+        } else {
+            git_status
+        };
+        let filename_text_color = entry_git_aware_label_color(status, entry.is_ignored, is_marked);
 
         let is_cut = self
             .clipboard
@@ -7412,7 +7440,7 @@ impl ProjectPanel {
             diagnostic_mark,
             reserves_chevron_slot,
             diagnostic_count,
-            git_status,
+            git_status: status,
             is_private: entry.is_private,
             worktree_id,
             canonical_path: entry.canonical_path.clone(),

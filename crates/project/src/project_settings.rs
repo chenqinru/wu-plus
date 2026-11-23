@@ -66,6 +66,8 @@ pub struct ProjectSettings {
     /// Configuration for Git-related features
     pub git: GitSettings,
 
+    pub svn: SvnSettings,
+
     /// Configuration for Node-related features
     pub node: NodeBinarySettings,
 
@@ -422,6 +424,13 @@ pub struct BlameSettings {
     pub show_avatar: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SvnSettings {
+    pub show_change_markers: bool,
+    pub inline_blame: bool,
+    pub blame_gutter: bool,
+}
+
 impl GitSettings {
     pub fn inline_blame_delay(&self) -> Option<Duration> {
         if self.inline_blame.delay_ms.0 > 0 {
@@ -512,6 +521,7 @@ impl Settings for ProjectSettings {
         let inline_diagnostics = diagnostics.inline.as_ref().unwrap();
 
         let git = content.git.as_ref().unwrap();
+        let svn = content.svn.as_ref();
         let git_enabled = {
             GitEnabledSettings {
                 status: git.enabled.as_ref().unwrap().is_git_status_enabled(),
@@ -622,6 +632,11 @@ impl Settings for ProjectSettings {
                 },
             },
             git: git_settings,
+            svn: SvnSettings {
+                show_change_markers: svn.and_then(|svn| svn.show_change_markers).unwrap_or(true),
+                inline_blame: svn.and_then(|svn| svn.inline_blame).unwrap_or(true),
+                blame_gutter: svn.and_then(|svn| svn.blame_gutter).unwrap_or(false),
+            },
             node: content.node.clone().unwrap().into(),
             load_direnv: project.load_direnv.clone().unwrap(),
             session: SessionSettings {

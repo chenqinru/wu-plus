@@ -252,6 +252,9 @@ pub struct SettingsContent {
     /// Configuration for Git-related features
     pub git: Option<GitSettings>,
 
+    /// Subversion preferences for ordinary source editors.
+    pub svn: Option<SvnSettingsContent>,
+
     /// Common language server settings.
     pub global_lsp_settings: Option<GlobalLspSettingsContent>,
 
@@ -323,6 +326,17 @@ pub struct SettingsContent {
     pub instrumentation: Option<InstrumentationSettingsContent>,
 }
 
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct SvnSettingsContent {
+    /// Show SVN change markers beside line numbers and on the scrollbar.
+    pub show_change_markers: Option<bool>,
+    /// Show SVN blame at the end of the current line.
+    pub inline_blame: Option<bool>,
+    /// Show SVN blame in a column beside the editor.
+    pub blame_gutter: Option<bool>,
+}
+
 /// Configuration for developer-oriented instrumentation tools that collect
 /// diagnostic data about a running Wu instance.
 #[with_fallible_options]
@@ -358,7 +372,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         agent_chat, call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar,
         preview_tabs,
         auto_update, base_keymap, debugger, diagnostics,
-        git,
+        git, svn,
         global_lsp_settings, image_viewer, markdown_preview, hide_mouse,
         log, line_indicator_format, outline_panel, project_panel, search_panel,
         node, proxy, reduce_motion, server_url, credentials_url, session, terminal,

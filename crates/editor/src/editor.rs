@@ -1069,6 +1069,8 @@ pub struct Editor {
     buffer_serialization: Option<BufferSerialization>,
     show_selection_menu: Option<bool>,
     blame: Option<Entity<GitBlame>>,
+    external_blame_loader: Option<std::rc::Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+    svn_settings: Option<project::project_settings::SvnSettings>,
     blame_subscription: Option<Subscription>,
     pending_blame_hover_observation: Option<Subscription>,
     custom_context_menu: Option<
@@ -1194,8 +1196,8 @@ pub struct EditorSnapshot {
     offset_content: bool,
     sticky_line_number_digits: usize,
     show_line_numbers: Option<bool>,
+    show_version_control_gutter: bool,
     number_deleted_lines: bool,
-    show_git_diff_gutter: Option<bool>,
     show_code_actions: Option<bool>,
     show_runnables: Option<bool>,
     show_breakpoints: Option<bool>,
@@ -2406,6 +2408,8 @@ impl Editor {
                 )
             }),
             blame: None,
+            external_blame_loader: None,
+            svn_settings: None,
             blame_subscription: None,
             pending_blame_hover_observation: None,
 
@@ -2981,8 +2985,8 @@ impl Editor {
                 .search_results_hold
                 .map_or(0, |hold| hold.min_line_number_digits),
             show_line_numbers: self.show_line_numbers,
+            show_version_control_gutter: self.show_version_control_gutter(cx),
             number_deleted_lines: self.number_deleted_lines,
-            show_git_diff_gutter: self.show_git_diff_gutter,
             semantic_tokens_enabled: self.semantic_token_state.enabled(),
             show_code_actions: self.show_code_actions,
             show_runnables: self.show_runnables,
@@ -4231,7 +4235,9 @@ impl Editor {
             t!("Set Breakpoint")
         };
 
-        let git_blame_msg = if self.show_git_blame_gutter {
+        let git_blame_msg = if self.external_blame_loader.is_some() {
+            t!("SVN Blame")
+        } else if self.show_git_blame_gutter {
             t!("Close Git Blame")
         } else {
             t!("Open Git Blame")
@@ -9992,7 +9998,9 @@ impl Editor {
                 self.refresh_inline_diagnostics(false, window, cx);
             }
 
-            if self.git_blame_inline_enabled != inline_blame_enabled {
+            if self.external_blame_loader.is_some() {
+                self.apply_svn_settings(window, cx);
+            } else if self.git_blame_inline_enabled != inline_blame_enabled {
                 self.toggle_git_blame_inline_internal(false, window, cx);
             }
 
@@ -11698,12 +11706,7 @@ impl EditorSnapshot {
             && let Some(ch_width) = cx.text_system().ch_width(font_id, font_size).log_err()
             && let Some(ch_advance) = cx.text_system().ch_advance(font_id, font_size).log_err()
         {
-            let show_git_gutter = self.show_git_diff_gutter.unwrap_or_else(|| {
-                matches!(
-                    ProjectSettings::get_global(cx).git.git_gutter,
-                    GitGutterSetting::TrackedFiles
-                )
-            });
+            let show_git_gutter = self.show_version_control_gutter;
             let gutter_settings = EditorSettings::get_global(cx).gutter;
             let show_line_numbers = self
                 .show_line_numbers

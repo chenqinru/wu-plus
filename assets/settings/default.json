@@ -1514,6 +1514,11 @@
   // Globs to match files that will be opened as read-only. You can still view these files,
   // but cannot edit them. This is useful for generated files or external dependencies.
   "read_only_files": [],
+  "svn": {
+    "show_change_markers": true,
+    "inline_blame": true,
+    "blame_gutter": false,
+  },
   // Git gutter behavior configuration.
   "git": {
     // Global switch to enable or disable all git integration features.

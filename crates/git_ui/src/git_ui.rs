@@ -65,6 +65,7 @@ pub mod text_diff_view;
 pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
+pub use conflict_view::attach_conflict_markers;
 
 const WINDOW_ACTIVATION_RESCAN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 

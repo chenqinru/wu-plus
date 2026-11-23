@@ -4838,8 +4838,8 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: n!("Git Status"),
-                description: n!("Show the Git status in the project panel."),
+                title: n!("Version Control Status"),
+                description: n!("Show version control colors on files and folders in the project panel."),
                 field: Box::new(SettingField {
                     json_path: Some("project_panel.git_status"),
                     pick: |settings_content| {
@@ -5076,9 +5076,9 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: n!("Git Status Indicator"),
+                title: n!("Version Control Status Indicator"),
                 description: n!(
-                    "Show a git status indicator next to file names in the project panel."
+                    "Show a version control status indicator next to names in the project panel."
                 ),
                 field: Box::new(SettingField {
                     json_path: Some("project_panel.git_status_indicator"),
@@ -7130,6 +7130,51 @@ fn terminal_page() -> SettingsPage {
 }
 
 fn version_control_page() -> SettingsPage {
+    fn svn_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader(n!("Subversion (SVN)")),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("SVN Change Markers"),
+                description: n!("Show SVN changes beside line numbers and on the scrollbar in source files."),
+                field: Box::new(SettingField {
+                    json_path: Some("svn.show_change_markers"),
+                    pick: |content| content.svn.as_ref()?.show_change_markers.as_ref(),
+                    write: |content, value, _| {
+                        content.svn.get_or_insert_default().show_change_markers = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Inline SVN Blame"),
+                description: n!("Show the SVN author, revision, and time at the end of the current line."),
+                field: Box::new(SettingField {
+                    json_path: Some("svn.inline_blame"),
+                    pick: |content| content.svn.as_ref()?.inline_blame.as_ref(),
+                    write: |content, value, _| {
+                        content.svn.get_or_insert_default().inline_blame = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Column SVN Blame"),
+                description: n!("Show a column with SVN blame for each committed line."),
+                field: Box::new(SettingField {
+                    json_path: Some("svn.blame_gutter"),
+                    pick: |content| content.svn.as_ref()?.blame_gutter.as_ref(),
+                    write: |content, value, _| {
+                        content.svn.get_or_insert_default().blame_gutter = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn git_integration_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader(n!("Git Integration")),
@@ -7659,6 +7704,7 @@ fn version_control_page() -> SettingsPage {
             branch_picker_section(),
             file_diff_section(),
             git_hunks_section(),
+            svn_section(),
         ],
     }
 }

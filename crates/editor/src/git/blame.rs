@@ -80,6 +80,7 @@ enum GitBlameKind {
     /// repository changes. The repository is resolved per buffer through the
     /// project.
     Live,
+    External,
     /// Precomputed per-buffer blames at a fixed revision, created via
     /// [`GitBlame::new_static`]. They are never regenerated. The annotated
     /// buffers are synthetic read-only buffers that do not belong to the
@@ -231,6 +232,43 @@ pub(crate) struct GlobalBlameRenderer(pub Arc<dyn BlameRenderer>);
 impl gpui::Global for GlobalBlameRenderer {}
 
 impl GitBlame {
+    /// Reuses the native row mapping for blame data supplied by a local provider.
+    pub fn new_external(
+        multi_buffer: Entity<MultiBuffer>,
+        project: Entity<Project>,
+        buffer: Entity<Buffer>,
+        entries: Vec<BlameEntry>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let snapshot = buffer.read(cx).snapshot();
+        let buffer_edits = buffer.update(cx, |buffer, _| buffer.subscribe());
+        let entries = build_blame_entry_sum_tree(entries, snapshot.max_point().row);
+        let mut buffers = HashMap::default();
+        buffers.insert(snapshot.remote_id(), GitBlameBuffer {
+            entries,
+            buffer_snapshot: snapshot,
+            buffer_edits,
+            commit_details: Default::default(),
+            commit_tag_names: Default::default(),
+        });
+        Self {
+            project,
+            multi_buffer: multi_buffer.downgrade(),
+            buffers,
+            task: Task::ready(Ok(())),
+            focused: true,
+            changed_while_blurred: false,
+            user_triggered: false,
+            regenerate_on_edit_task: Task::ready(Ok(())),
+            _regenerate_subscriptions: Vec::new(),
+            kind: GitBlameKind::External,
+        }
+    }
+
+    pub fn is_external(&self) -> bool {
+        matches!(self.kind, GitBlameKind::External)
+    }
+
     pub fn new(
         multi_buffer: Entity<MultiBuffer>,
         project: Entity<Project>,
@@ -359,12 +397,12 @@ impl GitBlame {
     }
 
     pub fn is_static(&self) -> bool {
-        matches!(self.kind, GitBlameKind::Static { .. })
+        !matches!(self.kind, GitBlameKind::Live)
     }
 
     pub fn highlighted_sha(&self) -> Option<Oid> {
         match &self.kind {
-            GitBlameKind::Live => None,
+            GitBlameKind::Live | GitBlameKind::External => None,
             GitBlameKind::Static {
                 highlighted_sha, ..
             } => *highlighted_sha,
@@ -372,6 +410,9 @@ impl GitBlame {
     }
 
     pub fn repository(&self, cx: &App, id: BufferId) -> Option<Entity<Repository>> {
+        if self.is_external() {
+            return None;
+        }
         if let GitBlameKind::Static { repository, .. } = &self.kind {
             return Some(repository.clone());
         }

@@ -64,10 +64,10 @@ use multi_buffer::{
 
 use project::{
     debugger::breakpoint_store::{Breakpoint, BreakpointSessionState},
-    project_settings::{InlineBlameLocation, ProjectSettings},
+    project_settings::ProjectSettings,
 };
 use settings::{
-    GitGutterSetting, GitHunkStyleSetting, IndentGuideBackgroundColoring, IndentGuideColoring,
+    GitHunkStyleSetting, IndentGuideBackgroundColoring, IndentGuideColoring,
     Settings,
 };
 use smallvec::{SmallVec, smallvec};
@@ -1414,7 +1414,7 @@ impl EditorElement {
                 let supports_git_diff_markers =
                     is_singleton || editor.allow_git_diff_scrollbar_markers;
                 // Git
-                (supports_git_diff_markers && scrollbar_settings.git_diff && snapshot.buffer_snapshot().has_diff_hunks())
+                (supports_git_diff_markers && editor.show_version_control_scrollbar_marks(cx) && snapshot.buffer_snapshot().has_diff_hunks())
                 ||
                 // Buffer Search Results
                 (is_singleton && scrollbar_settings.search_results && (editor.has_background_highlights(HighlightKey::BufferSearchHighlights) || editor.has_background_highlights(HighlightKey::SearchPanelMatches)))
@@ -1762,8 +1762,7 @@ impl EditorElement {
             .display_diff_hunks_for_rows(display_rows, folded_buffers)
             .map(|hunk| (hunk, None))
             .collect::<Vec<_>>();
-        let git_gutter_setting = ProjectSettings::get_global(cx).git.git_gutter;
-        if let GitGutterSetting::TrackedFiles = git_gutter_setting {
+        if snapshot.show_version_control_gutter {
             for (hunk, hitbox) in &mut display_hunks {
                 if matches!(hunk, DisplayDiffHunk::Unfolded { .. }) {
                     let hunk_bounds = Self::diff_hunk_bounds(
@@ -2122,7 +2121,11 @@ impl EditorElement {
             })
             .flatten()?;
 
-        let mut element = render_inline_blame_entry(entry.clone(), &self.style, cx)?;
+        let mut element = if blame.read(cx).is_external() {
+            render_external_blame(&entry, &self.style.text, cx)
+        } else {
+            render_inline_blame_entry(entry.clone(), &self.style, cx)?
+        };
 
         let start_y =
             content_origin.y + line_height * ((display_row.as_f64() - scroll_position.y) as f32);
@@ -5470,17 +5473,7 @@ impl EditorElement {
             }
         }
 
-        let show_git_gutter = layout
-            .position_map
-            .snapshot
-            .show_git_diff_gutter
-            .unwrap_or_else(|| {
-                matches!(
-                    ProjectSettings::get_global(cx).git.git_gutter,
-                    GitGutterSetting::TrackedFiles
-                )
-            });
-        if show_git_gutter {
+        if layout.position_map.snapshot.show_version_control_gutter {
             self.paint_gutter_diff_hunks(layout, self.split_side, window, cx)
         }
 
@@ -6193,7 +6186,7 @@ impl EditorElement {
         self.editor.update(cx, |editor, cx| {
             let is_singleton = editor.buffer_kind(cx) == ItemBufferKind::Singleton;
             let scrollbar_settings = EditorSettings::get_global(cx).scrollbar;
-            let show_git_diff_markers = scrollbar_settings.git_diff
+            let show_git_diff_markers = editor.show_version_control_scrollbar_marks(cx)
                 && (is_singleton || editor.allow_git_diff_scrollbar_markers);
             if !is_singleton && !show_git_diff_markers {
                 editor.scrollbar_marker_state.dirty = true;
@@ -7132,6 +7125,17 @@ fn render_blame_entry_popover(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
+    if blame.read(cx).is_external() {
+        let text = external_blame_text(&blame_entry);
+        return Some(div()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().editor_background)
+            .child(text)
+            .into_any_element());
+    }
     if markdown.read(cx).is_parsing() {
         return None;
     }
@@ -7166,6 +7170,9 @@ fn render_blame_entry(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
+    if blame.read(cx).is_external() {
+        return Some(render_external_blame(&blame_entry, &style.text, cx));
+    }
     let index: u32 = blame_entry.sha.into();
     let mut sha_color = cx.theme().players().color_for_participant(index).cursor;
 
@@ -7196,6 +7203,26 @@ fn render_blame_entry(
         window,
         cx,
     )
+}
+
+fn external_blame_text(entry: &BlameEntry) -> String {
+    let author = entry.author.as_deref().unwrap_or_default();
+    let summary = entry.summary.as_deref().unwrap_or_default();
+    if author.is_empty() {
+        summary.to_owned()
+    } else {
+        format!("{author} · {summary}")
+    }
+}
+
+fn render_external_blame(entry: &BlameEntry, style: &gpui::TextStyle, cx: &App) -> AnyElement {
+    div()
+        .font(style.font())
+        .line_height(style.line_height)
+        .text_color(cx.theme().status().hint)
+        .truncate()
+        .child(external_blame_text(entry))
+        .into_any_element()
 }
 
 #[derive(Debug)]
@@ -8977,12 +9004,11 @@ impl Element for EditorElement {
                             // Blame is only painted inline for the Inline location, so
                             // reserving scroll room for it in other locations would let
                             // the editor scroll into blank space.
-                            if ProjectSettings::get_global(cx).git.inline_blame.location
-                                != InlineBlameLocation::Inline
-                            {
+                            if !editor.inline_blame_in_editor(cx) {
                                 return None;
                             }
                             let blame = editor.blame.as_ref()?;
+                            let external = blame.read(cx).is_external();
                             let (_, blame_entry) = blame
                                 .update(cx, |blame, cx| {
                                     let row_infos =
@@ -8990,7 +9016,11 @@ impl Element for EditorElement {
                                     blame.blame_for_rows(&[row_infos], cx).next()
                                 })
                                 .flatten()?;
-                            let mut element = render_inline_blame_entry(blame_entry, style, cx)?;
+                            let mut element = if external {
+                                render_external_blame(&blame_entry, &style.text, cx)
+                            } else {
+                                render_inline_blame_entry(blame_entry, style, cx)?
+                            };
                             let inline_blame_padding =
                                 ProjectSettings::get_global(cx).git.inline_blame.padding as f32
                                     * em_advance;
