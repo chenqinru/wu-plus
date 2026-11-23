@@ -25,6 +25,8 @@ scripts/wu.sh bundle
 
 验收期间可用 `scripts/wu.sh build` 只构建本地二进制。需要生成安装包时再运行 `scripts/wu.sh bundle`。此 Fork 以 Wu 官方 `v1.5.0` 为基线。构建直接使用当前检出的宿主源码，采用 Apple Silicon 的运行时 Metal 着色器路径。打包使用匹配版本的官方应用包提供上游资源与 Git 辅助程序，通过 `WU_PLUS_APP_TEMPLATE` 可指定该应用的位置。构建产物在 `dist/`，可通过 `WU_PLUS_DIST_DIR` 改写。只更新扩展时运行 `scripts/package-plugin.sh`，然后重启 Wu Plus 加载新的后台进程。应用和扩展使用本地临时签名。
 
+在 Wu 编辑器中打开仓库根目录，在调试视图选择「调试 Wu Plus」。启动前会构建宿主和 SVN 后台，自动注册开发扩展，并用 `.build/dev-profile` 启动调试实例。首次调试会下载并校验 CodeLLDB，后续使用项目内缓存，可以在宿主 Rust 源码中设置断点。
+
 ~~~bash
 cargo test --locked --manifest-path plugin/Cargo.toml
 scripts/smoke-workspace.sh

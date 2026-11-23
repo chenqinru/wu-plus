@@ -1,11 +1,17 @@
 [
   {
-    "label": "Debug Wu (CodeLLDB)",
+    "label": "调试 Wu Plus",
     "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/.build/dev-bin/wu",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": ["--user-data-dir", "$ZED_WORKTREE_ROOT/.build/dev-profile"],
+    "sourceLanguages": ["rust"],
     "build": {
-      "label": "Build Wu",
-      "command": "cargo",
-      "args": ["build", "-p", "wu", "--bin", "wu"],
-    },
-  },
+      "label": "构建 Wu Plus 和 SVN 后台",
+      "command": "./scripts/wu.sh",
+      "args": ["prepare-debug"],
+      "cwd": "$ZED_WORKTREE_ROOT"
+    }
+  }
 ]
