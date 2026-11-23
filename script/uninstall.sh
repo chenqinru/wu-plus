@@ -1,140 +1,89 @@
 #!/usr/bin/env sh
 set -eu
 
-# Uninstalls Wu that was installed using the install.sh script
+# Uninstalls Wu Plus that was installed using the install.sh script.
 
-check_remaining_installations() {
-    platform="$(uname -s)"
-    if [ "$platform" = "Darwin" ]; then
-        # Check for any Wu variants in /Applications
-        remaining=$(ls -d /Applications/Wu*.app 2>/dev/null | wc -l)
-        [ "$remaining" -eq 0 ]
-    else
-        # Check for any Wu variants in ~/.local
-        remaining=$(ls -d "$HOME/.local/wu"*.app 2>/dev/null | wc -l)
-        [ "$remaining" -eq 0 ]
+remove_cli_link() {
+    cli_link="$HOME/.local/bin/wu-plus"
+    if [ -L "$cli_link" ] && [ "$(readlink "$cli_link")" = "$1" ]; then
+        if [ -x "$2" ]; then
+            ln -sf "$2" "$cli_link"
+        else
+            rm -f "$cli_link"
+        fi
     fi
 }
 
 prompt_remove_preferences() {
-    printf "Do you want to keep your Wu preferences? [Y/n] "
-    read -r response
+    printf "Do you want to keep your Wu Plus user data and preferences? [Y/n] "
+    IFS= read -r response || response=""
     case "$response" in
         [nN]|[nN][oO])
-            rm -rf "$HOME/.config/wu"
-            echo "Preferences removed."
+            rm -rf "$@"
+            echo "Wu Plus user data and preferences removed."
             ;;
         *)
-            echo "Preferences kept."
+            echo "Wu Plus user data and preferences kept."
             ;;
     esac
-}
-
-main() {
-    platform="$(uname -s)"
-    channel="${ZED_CHANNEL:-stable}"
-
-    if [ "$platform" = "Darwin" ]; then
-        platform="macos"
-    elif [ "$platform" = "Linux" ]; then
-        platform="linux"
-    else
-        echo "Unsupported platform $platform"
-        exit 1
-    fi
-
-    "$platform"
-
-    echo "Wu has been uninstalled"
 }
 
 linux() {
-    suffix=""
-    if [ "$channel" != "stable" ]; then
-        suffix="-$channel"
+    stable_app="$HOME/.local/wu-plus.app"
+    dev_app="$HOME/.local/wu-plus-dev.app"
+    app="$stable_app"
+    other_app="$dev_app"
+    if [ "$channel" = "dev" ]; then
+        app="$dev_app"
+        other_app="$stable_app"
     fi
 
-    appid=""
-    db_suffix="stable"
-    case "$channel" in
-      stable)
-        appid="me.farshed.Wu"
-        db_suffix="stable"
-        ;;
-      dev)
-        appid="me.farshed.Wu-Dev"
-        db_suffix="dev"
-        ;;
-      *)
-        echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="me.farshed.Wu"
-        db_suffix="stable"
-        ;;
-    esac
+    remove_cli_link "$app/bin/wu-plus" "$other_app/bin/wu-plus"
+    rm -rf "$app"
+    rm -f "$HOME/.local/share/applications/$app_id.desktop"
 
-    # Remove the app directory
-    rm -rf "$HOME/.local/wu$suffix.app"
-
-    # Remove the binary symlink
-    rm -f "$HOME/.local/bin/wu"
-
-    # Remove the .desktop file
-    rm -f "$HOME/.local/share/applications/${appid}.desktop"
-
-    # Remove the database directory for this channel
-    rm -rf "$HOME/.local/share/wu/db/0-$db_suffix"
-
-    # Remove socket file
-    rm -f "$HOME/.local/share/wu/wu-$db_suffix.sock"
-
-    # Remove the entire Wu directory if no installations remain
-    if check_remaining_installations; then
-        rm -rf "$HOME/.local/share/wu"
-        prompt_remove_preferences
+    if [ ! -d "$stable_app" ] && [ ! -d "$dev_app" ]; then
+        prompt_remove_preferences \
+            "${XDG_CONFIG_HOME:-$HOME/.config}/wu plus" \
+            "${XDG_DATA_HOME:-$HOME/.local/share}/wu plus" \
+            "${XDG_STATE_HOME:-$HOME/.local/state}/wu plus" \
+            "${XDG_CACHE_HOME:-$HOME/.cache}/wu plus"
     fi
-
-    rm -rf "$HOME/.wu_server"
 }
 
 macos() {
-    app="Wu.app"
-    db_suffix="stable"
-    app_id="me.farshed.Wu"
+    stable_app="/Applications/Wu Plus.app"
+    dev_app="/Applications/Wu Plus Dev.app"
+    app="$stable_app"
+    other_app="$dev_app"
+    if [ "$channel" = "dev" ]; then
+        app="$dev_app"
+        other_app="$stable_app"
+    fi
+
+    remove_cli_link "$app/Contents/MacOS/cli" "$other_app/Contents/MacOS/cli"
+    rm -rf "$app"
+
+    if [ ! -d "$stable_app" ] && [ ! -d "$dev_app" ]; then
+        prompt_remove_preferences "$HOME/Library/Application Support/Wu Plus"
+    fi
+}
+
+main() {
+    channel="${WU_CHANNEL:-${ZED_CHANNEL:-stable}}"
     case "$channel" in
-      dev)
-        app="Wu Dev.app"
-        db_suffix="dev"
-        app_id="me.farshed.Wu-Dev"
-        ;;
+        stable) app_id="io.github.chenqinru.wu-plus" ;;
+        dev) app_id="io.github.chenqinru.wu-plus-dev" ;;
+        *) echo "Unsupported release channel $channel" >&2; exit 1 ;;
     esac
 
-    # Remove the app bundle
-    if [ -d "/Applications/$app" ]; then
-        rm -rf "/Applications/$app"
-    fi
-
-    # Remove the binary symlink
-    rm -f "$HOME/.local/bin/wu"
-
-    # Remove the database directory for this channel
-    rm -rf "$HOME/Library/Application Support/Wu/db/0-$db_suffix"
-
-    # Remove app-specific files and directories
-    rm -rf "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/$app_id.sfl"*
-    rm -rf "$HOME/Library/Caches/$app_id"
-    rm -rf "$HOME/Library/HTTPStorages/$app_id"
-    rm -rf "$HOME/Library/Preferences/$app_id.plist"
-    rm -rf "$HOME/Library/Saved Application State/$app_id.savedState"
-
-    # Remove the entire Wu directory if no installations remain
-    if check_remaining_installations; then
-        rm -rf "$HOME/Library/Application Support/Wu"
-        rm -rf "$HOME/Library/Logs/Wu"
-
-        prompt_remove_preferences
-    fi
-
-    rm -rf "$HOME/.wu_server"
+    platform="$(uname -s)"
+    case "$platform" in
+        Darwin) macos ;;
+        Linux) linux ;;
+        *) echo "Unsupported platform $platform" >&2; exit 1 ;;
+    esac
+    echo "Wu Plus has been uninstalled"
 }
 
 main "$@"

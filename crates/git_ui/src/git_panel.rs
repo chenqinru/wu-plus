@@ -1279,7 +1279,7 @@ impl GitStatusEntry {
 
 const MAX_COMMIT_DIFF_BYTES: usize = 20_000;
 
-fn build_commit_message_prompt(instructions: Option<&str>, draft: &str, diff: &str) -> String {
+pub fn build_commit_message_prompt(instructions: Option<&str>, draft: &str, diff: &str) -> String {
     let mut prompt = include_str!("commit_message_prompt.txt").to_owned();
     if let Some(instructions) = instructions {
         prompt.push_str(&format!(

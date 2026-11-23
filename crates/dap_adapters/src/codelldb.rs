@@ -137,6 +137,10 @@ impl DebugAdapter for CodeLldbDebugAdapter {
     fn dap_schema(&self) -> serde_json::Value {
         json!({
             "properties": {
+                "adapter_binary": {
+                    "type": "string",
+                    "description": "Path to the CodeLLDB executable for this launch, relative to the worktree or absolute"
+                },
                 "request": {
                     "type": "string",
                     "enum": ["attach", "launch"],
@@ -334,7 +338,20 @@ impl DebugAdapter for CodeLldbDebugAdapter {
         user_env: Option<HashMap<String, String>>,
         _: &mut AsyncApp,
     ) -> Result<DebugAdapterBinary> {
-        let mut command = user_installed_path
+        let mut json_config = config.config.clone();
+        let launch_binary = json_config
+            .as_object_mut()
+            .and_then(|config| config.remove("adapter_binary"))
+            .map(|path| {
+                let path = path
+                    .as_str()
+                    .filter(|path| !path.is_empty())
+                    .context("adapter_binary must be a non-empty path")?;
+                Ok::<_, anyhow::Error>(delegate.worktree_root_path().join(path))
+            })
+            .transpose()?;
+        let mut command = launch_binary
+            .or(user_installed_path)
             .map(|p| p.to_string_lossy().into_owned())
             .or(self.path_to_codelldb.get().cloned());
 
@@ -387,8 +404,6 @@ impl DebugAdapter for CodeLldbDebugAdapter {
             self.path_to_codelldb.set(path.clone()).ok();
             command = Some(path);
         };
-        let mut json_config = config.config.clone();
-
         // Auto-detect Rust projects and add sourceLanguages if not present.
         // This enables panic breakpoints to work correctly with CodeLLDB.
         if let Some(config_obj) = json_config.as_object_mut() {

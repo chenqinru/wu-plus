@@ -136,18 +136,9 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
+        if self.busy || self.client.is_none() {
             return;
         }
-        let Some(client) = self
-            .client
-            .as_ref()
-            .filter(|client| client.has_worktree_diff())
-        else {
-            self.open_path_diff(target.unwrap_or_else(|| ".".into()), window, cx);
-            return;
-        };
-        let supports_focus = client.has_focused_worktree_diff();
         let Some(root) = self.selected_root.as_deref() else {
             return;
         };
@@ -181,7 +172,7 @@ impl SvnPanel {
             ..
         }) = &mut self.preview_request
         {
-            if !*focused && (target.is_none() || !supports_focus) {
+            if !*focused && target.is_none() {
                 *pending = target;
                 *background = false;
                 return;
@@ -190,17 +181,16 @@ impl SvnPanel {
                 return;
             }
         }
-        self.request_worktree_comparison(target, supports_focus, false, window, cx);
+        self.request_worktree_comparison(target, false, window, cx);
     }
 
     pub(super) fn load_worktree_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_worktree_comparison(None, false, true, window, cx);
+        self.request_worktree_comparison(None, true, window, cx);
     }
 
     fn request_worktree_comparison(
         &mut self,
         target: Option<String>,
-        focus_file: bool,
         background: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -209,8 +199,7 @@ impl SvnPanel {
             "read",
             json!({
                 "operation":"worktree_diff",
-                "path":target,
-                "focus_path":target.as_ref().filter(|_| focus_file),
+                "focus_path":target,
                 "background":background,
             }),
             Output::WorktreeDiff,

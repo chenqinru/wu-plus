@@ -35,11 +35,6 @@
       },
     },
   },
-  "dap": {
-    "CodeLLDB": {
-      "binary": ".build/codelldb/extension/adapter/codelldb",
-    },
-  },
   "hard_tabs": false,
   "formatter": "auto",
   "remove_trailing_whitespace_on_save": true,

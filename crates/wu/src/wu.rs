@@ -665,11 +665,16 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         );
 
         #[cfg(target_os = "macos")]
-        add_panel_when_ready(
-            svn_panel::SvnPanel::load(workspace_handle.clone(), cx.clone()),
-            workspace_handle.clone(),
-            cx.clone(),
-        ).await;
+        if let Ok(Some(store)) =
+            workspace_handle.read_with(cx, |_, cx| ExtensionStore::try_global(cx))
+        {
+            add_panel_when_ready(
+                svn_panel::SvnPanel::load(workspace_handle.clone(), store, cx.clone()),
+                workspace_handle.clone(),
+                cx.clone(),
+            )
+            .await;
+        }
 
         workspace_handle.update(cx, |workspace, cx| {
             workspace.finish_dock_restoration(cx);
@@ -1193,8 +1198,12 @@ fn initialize_pane(
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
             let file_diff_style_toolbar = cx.new(FileDiffStyleToolbar::new);
             toolbar.add_item(file_diff_style_toolbar, window, cx);
-            let svn_diff_navigation = cx.new(|_| svn_panel::preview::WorktreeDiffToolbar::default());
-            toolbar.add_item(svn_diff_navigation, window, cx);
+            #[cfg(target_os = "macos")]
+            {
+                let svn_diff_navigation =
+                    cx.new(|_| svn_panel::preview::WorktreeDiffToolbar::default());
+                toolbar.add_item(svn_diff_navigation, window, cx);
+            }
             let breadcrumbs = cx.new(|_| Breadcrumbs::new());
             toolbar.add_item(breadcrumbs, window, cx);
             let buffer_search_bar = cx.new(|cx| {
@@ -5543,6 +5552,8 @@ mod tests {
                 "snippets",
                 "stash_picker",
                 "svg",
+                #[cfg(target_os = "macos")]
+                "svn",
                 "syntax_tree_view",
                 "tab_switcher",
                 "tabular_data",

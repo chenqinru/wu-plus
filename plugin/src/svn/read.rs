@@ -484,11 +484,6 @@ enum Operation {
         include_files: bool,
         focus_path: Option<String>,
     },
-    RevisionFile {
-        path: String,
-        revision: u64,
-        action: String,
-    },
     Blame {
         path: String,
         revision: Option<String>,
@@ -515,7 +510,6 @@ pub(super) fn run(params: Read, cancellation: &Cancellation) -> Result<Value> {
     let needs_server = match &params.operation {
         Operation::Diff { revision, .. } => revision.is_some(),
         Operation::History { .. }
-        | Operation::RevisionFile { .. }
         | Operation::RevisionReview { .. }
         | Operation::Blame { .. }
         | Operation::Branches { .. }
@@ -652,15 +646,6 @@ pub(super) fn run(params: Read, cancellation: &Cancellation) -> Result<Value> {
             response["warning"] = json!(warning());
             return Ok(response);
         }
-        Operation::RevisionFile {
-            path,
-            revision,
-            action,
-        } => {
-            let mut review = revision_file(&copy, &path, revision, &action, false, &invoke)?;
-            review["warning"] = json!(warning());
-            return Ok(review);
-        }
         Operation::RevisionReview {
             revision,
             include_files,
@@ -709,7 +694,7 @@ pub(super) fn run(params: Read, cancellation: &Cancellation) -> Result<Value> {
             } else {
                 Value::Null
             };
-            let annotated_text = if editor {
+            let annotated_text = if editor || !blame.is_null() {
                 String::new()
             } else {
                 invoke(args("--verbose"), vec![peg(&target)])?
@@ -1483,9 +1468,7 @@ fn url_bytes(address: &str) -> impl Iterator<Item = u8> + '_ {
 }
 
 fn format_history(output: &str) -> Result<Value> {
-    use std::fmt::Write as _;
     let document = xml(output)?;
-    let mut text_output = String::new();
     let mut revisions = Vec::new();
     for entry in document
         .descendants()
@@ -1500,14 +1483,11 @@ fn format_history(output: &str) -> Result<Value> {
         let author = text(entry, "author").unwrap_or_default();
         let date = text(entry, "date").unwrap_or_default();
         let message = text(entry, "msg").unwrap_or_default();
-        let _ = writeln!(text_output, "r{revision}  {author}  {date}\n{message}");
         let paths = entry.descendants().filter(|node| node.has_tag_name("path")).map(|node| {
             let path = node.text().unwrap_or_default();
             let action = node.attribute("action").unwrap_or_default();
-            let _ = writeln!(text_output, "  {action} {path}");
             json!({"path":path,"action":action,"kind":node.attribute("kind").unwrap_or_default()})
         }).collect::<Vec<_>>();
-        text_output.push('\n');
         revisions.push(json!({"revision":revision,"author":author,"date":date,"message":message,"paths":paths}));
     }
     let next_before = (revisions.len() == 50)
@@ -1516,7 +1496,7 @@ fn format_history(output: &str) -> Result<Value> {
         .and_then(|revision| revision["revision"].as_u64())
         .filter(|revision| *revision > 1)
         .map(|revision| revision - 1);
-    Ok(json!({"text":text_output,"revisions":revisions,"next_before":next_before}))
+    Ok(json!({"revisions":revisions,"next_before":next_before}))
 }
 
 pub(super) fn incoming_tree_add<'a>(document: &'a Document<'_>) -> Option<roxmltree::Node<'a, 'a>> {

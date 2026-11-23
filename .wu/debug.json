@@ -1,7 +1,8 @@
 [
   {
-    "label": "调试 Wu Plus",
+    "label": "调试 Wu Plus（Apple Silicon / SVN）",
     "adapter": "CodeLLDB",
+    "adapter_binary": ".build/codelldb/extension/adapter/codelldb",
     "request": "launch",
     "program": "$ZED_WORKTREE_ROOT/.build/dev-bin/wu",
     "cwd": "$ZED_WORKTREE_ROOT",
@@ -12,6 +13,15 @@
       "command": "./scripts/wu.sh",
       "args": ["prepare-debug"],
       "cwd": "$ZED_WORKTREE_ROOT"
+    }
+  },
+  {
+    "label": "Debug Wu Plus (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "build": {
+      "label": "Build Wu Plus",
+      "command": "cargo",
+      "args": ["build", "-p", "wu", "--bin", "wu"]
     }
   }
 ]

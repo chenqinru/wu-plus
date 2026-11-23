@@ -4838,8 +4838,16 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: n!("Version Control Status"),
-                description: n!("Show version control colors on files and folders in the project panel."),
+                title: if cfg!(target_os = "macos") {
+                    n!("Version Control Status")
+                } else {
+                    n!("Git Status")
+                },
+                description: if cfg!(target_os = "macos") {
+                    n!("Show version control colors on files and folders in the project panel.")
+                } else {
+                    n!("Show the Git status in the project panel.")
+                },
                 field: Box::new(SettingField {
                     json_path: Some("project_panel.git_status"),
                     pick: |settings_content| {
@@ -5076,10 +5084,16 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: n!("Version Control Status Indicator"),
-                description: n!(
-                    "Show a version control status indicator next to names in the project panel."
-                ),
+                title: if cfg!(target_os = "macos") {
+                    n!("Version Control Status Indicator")
+                } else {
+                    n!("Git Status Indicator")
+                },
+                description: if cfg!(target_os = "macos") {
+                    n!("Show a version control status indicator next to names in the project panel.")
+                } else {
+                    n!("Show a git status indicator next to file names in the project panel.")
+                },
                 field: Box::new(SettingField {
                     json_path: Some("project_panel.git_status_indicator"),
                     pick: |settings_content| {
@@ -7130,8 +7144,11 @@ fn terminal_page() -> SettingsPage {
 }
 
 fn version_control_page() -> SettingsPage {
-    fn svn_section() -> [SettingsPageItem; 4] {
-        [
+    fn svn_section() -> Vec<SettingsPageItem> {
+        if !cfg!(target_os = "macos") {
+            return Vec::new();
+        }
+        vec![
             SettingsPageItem::SectionHeader(n!("Subversion (SVN)")),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("SVN Change Markers"),

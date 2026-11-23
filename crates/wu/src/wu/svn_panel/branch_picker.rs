@@ -40,7 +40,6 @@ impl BranchPicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let root = copy.root;
-        let can_list = client.has_switch_targets();
         let delegate = Delegate {
             parent: cx.weak_entity(),
             panel: panel.clone(),
@@ -49,7 +48,7 @@ impl BranchPicker {
             targets: Vec::new(),
             matches: Vec::new(),
             selected: 0,
-            loading: can_list,
+            loading: true,
             failed: false,
         };
         let picker = cx.new(|cx| {
@@ -57,48 +56,48 @@ impl BranchPicker {
                 .initial_width(rems(20.))
                 .show_scrollbar(true)
         });
-        let request = can_list.then(|| {
-            let id = client.next_id();
-            let load = cx.background_spawn({
-                let client = client.clone();
-                async move {
-                    client.request(id, "read", params).await.and_then(|value| {
-                        serde_json::from_value::<Targets>(value).map_err(decode_error)
-                    })
-                }
-            });
-            let task = cx.spawn_in(window, async move |this, cx| {
-                let result = load.await;
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.request = None;
-                    let targets = match result {
-                        Ok(result) => {
-                            if let Some(warning) = result.warning {
-                                let _ = panel
-                                    .update(cx, |panel, cx| panel.show_status(warning, true, cx));
+        let id = client.next_id();
+        let load = cx.background_spawn({
+            let client = client.clone();
+            async move {
+                client.request(id, "read", params).await.and_then(|value| {
+                    serde_json::from_value::<Targets>(value).map_err(decode_error)
+                })
+            }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.request = None;
+                let targets = match result {
+                    Ok(result) => {
+                        if let Some(warning) = result.warning {
+                            let _ =
+                                panel.update(cx, |panel, cx| panel.show_status(warning, true, cx));
+                        }
+                        Some(result.targets)
+                    }
+                    Err(error) => {
+                        let _ = panel.update(cx, |panel, cx| {
+                            if panel.selected_root.as_ref() == Some(&root) {
+                                panel.set_error(error, Some(copy.url), cx);
                             }
-                            Some(result.targets)
-                        }
-                        Err(error) => {
-                            let _ = panel.update(cx, |panel, cx| {
-                                if panel.selected_root.as_ref() == Some(&root) {
-                                    panel.set_error(error, Some(copy.url), cx);
-                                }
-                            });
-                            None
-                        }
-                    };
-                    this.picker.update(cx, |picker, cx| {
-                        picker.delegate.loading = false;
-                        picker.delegate.failed = targets.is_none();
-                        picker.delegate.targets = targets.unwrap_or_default();
-                        picker.update_matches(picker.query(cx), window, cx);
-                    });
+                        });
+                        None
+                    }
+                };
+                this.picker.update(cx, |picker, cx| {
+                    picker.delegate.loading = false;
+                    picker.delegate.failed = targets.is_none();
+                    picker.delegate.targets = targets.unwrap_or_default();
+                    picker.update_matches(picker.query(cx), window, cx);
                 });
             });
-            (client, id, task)
         });
-        Self { picker, request }
+        Self {
+            picker,
+            request: Some((client, id, task)),
+        }
     }
 }
 

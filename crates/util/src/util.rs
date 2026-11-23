@@ -371,11 +371,11 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         // so here ./cli is for both installed and development builds.
         &["./cli"]
     } else if cfg!(target_os = "windows") {
-        // bin/wu.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/wu.exe", "./cli.exe"]
+        // The installer renames the CLI; Cargo builds still produce cli.exe.
+        &["bin/wu-plus.exe", "./cli.exe"]
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/wu", "./cli"]
+        &["../bin/wu-plus", "../bin/wu", "./cli"]
     } else {
         anyhow::bail!("unsupported platform for determining zed-cli path");
     };

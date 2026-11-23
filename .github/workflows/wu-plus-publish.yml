@@ -73,8 +73,8 @@ jobs:
             wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz
             Subversion-macos-{aarch64,x86_64}.zip
           )
-          cp ../manifest/version.txt version.txt
-          diff -u ../manifest/SHA256SUMS <(sha256sum version.txt "${assets[@]}")
+          cp ../manifest/{version.txt,RELEASE_NOTES.md} .
+          diff -u ../manifest/SHA256SUMS <(sha256sum version.txt RELEASE_NOTES.md "${assets[@]}")
           latest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
             --limit 20 --json isLatest,tagName --jq '.[] | select(.isLatest) | .tagName')
           if [[ -n $latest ]]; then
@@ -91,7 +91,7 @@ jobs:
             jq -e --arg target "$REVISION" '.isDraft and .targetCommitish == $target' <<<"$draft" >/dev/null
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$REVISION" \
-              --title "Wu Plus $version" --notes ""
+              --title "Wu Plus $version" --notes-file RELEASE_NOTES.md
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "${assets[@]}" version.txt ../manifest/SHA256SUMS --clobber
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md --draft=false --latest

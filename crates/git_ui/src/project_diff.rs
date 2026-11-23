@@ -7,11 +7,9 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use buffer_diff::DiffHunkSecondaryStatus;
-use editor::{
-    DefaultDiffHunkRenderer, Editor, EditorEvent, SplittableEditor,
-    actions::{GoToHunk, GoToPreviousHunk},
-};
+use editor::{DefaultDiffHunkRenderer, Editor, EditorEvent, SplittableEditor};
 use git::{Commit, StageAll, StageAndNext, ToggleStaged, UnstageAll, UnstageAndNext};
+use git_ui_core::file_diff_view::DiffHunkNavigation;
 use gpui::{
     Action, App, AppContext as _, Entity, EventEmitter, FocusHandle, Focusable, Render,
     Subscription, Task, WeakEntity, actions,
@@ -819,35 +817,10 @@ impl Render for ProjectDiffToolbar {
             })
             // n.b. the only reason these arrows are here is because we don't
             // support "undo" for staging so we need a way to go back.
-            .child(
-                h_group_sm()
-                    .child(
-                        IconButton::new("up", IconName::ArrowUp)
-                            .icon_size(IconSize::Small)
-                            .disabled(!button_states.prev_next)
-                            .tooltip(Tooltip::for_action_title_in(
-                                t!("Go to Previous Hunk"),
-                                &GoToPreviousHunk,
-                                &focus_handle,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch_action(&GoToPreviousHunk, window, cx)
-                            })),
-                    )
-                    .child(
-                        IconButton::new("down", IconName::ArrowDown)
-                            .icon_size(IconSize::Small)
-                            .disabled(!button_states.prev_next)
-                            .tooltip(Tooltip::for_action_title_in(
-                                t!("Go to Next Hunk"),
-                                &GoToHunk,
-                                &focus_handle,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch_action(&GoToHunk, window, cx)
-                            })),
-                    ),
-            )
+            .child(DiffHunkNavigation::new(
+                focus_handle.clone(),
+                button_states.prev_next,
+            ))
             .child(Divider::vertical())
             .child(
                 h_group_sm()

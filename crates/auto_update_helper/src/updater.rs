@@ -281,7 +281,7 @@ fn release_file_handles(app_dir: &Path) -> Result<()> {
     let files_to_release = [
         app_dir.join("Wu.exe"),
         app_dir.join("bin\\wu-plus.exe"),
-        app_dir.join("bin\\wu"),
+        app_dir.join("bin\\wu-plus"),
         app_dir.join("conpty.dll"),
     ];
 

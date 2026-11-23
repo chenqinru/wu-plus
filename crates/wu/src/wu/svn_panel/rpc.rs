@@ -2,19 +2,35 @@ use futures::{
     StreamExt,
     channel::{mpsc, oneshot},
 };
+use i18n::t;
 use serde_json::{Value, json};
 use smol::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 use util::command::{Child, Stdio, new_command};
 
-pub(super) const VERSION: u64 = 1;
+const VERSION: u64 = 2;
+
+pub(super) fn provider_executable(extension_dir: &Path) -> Result<PathBuf, Error> {
+    let canonical = |path: &Path| {
+        path.canonicalize()
+            .map_err(|error| Error::transport(error.to_string()))
+    };
+    let extension_dir = canonical(extension_dir)?;
+    let executable = canonical(&extension_dir.join("bin/wu-plus-subversion-provider"))?;
+    if !executable.starts_with(&extension_dir) {
+        return Err(Error::transport(
+            "The provider executable points outside the installed extension.",
+        ));
+    }
+    Ok(executable)
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Error {
@@ -39,70 +55,25 @@ pub(super) struct Client {
     outgoing: Option<mpsc::UnboundedSender<String>>,
     pending: Pending,
     next: AtomicU64,
-    worktree_diff: AtomicBool,
-    focused_worktree_diff: AtomicBool,
-    commit_diff: AtomicBool,
-    revision_review: AtomicBool,
-    focused_revision_review: AtomicBool,
-    switch_targets: AtomicBool,
 }
 
 impl Client {
-    pub(super) async fn connect(
-        extension_dir: &Path,
-        executable: &Path,
-    ) -> Result<Arc<Self>, Error> {
-        let client = Self::start(extension_dir, executable)?;
+    pub(super) async fn connect(extension_dir: &Path) -> Result<Arc<Self>, Error> {
+        let client = Self::start(extension_dir)?;
         let result = client
             .request(client.next_id(), "initialize", json!({}))
             .await?;
         if result["protocol_version"].as_u64() != Some(VERSION) {
             return Err(Error {
                 kind: "protocol".into(),
-                message: "The SVN plugin protocol is incompatible.".into(),
+                message: t!("SVN plugin protocol is incompatible.").to_string(),
             });
         }
-        client.set_worktree_diff(result["worktree_diff"].as_bool().unwrap_or(false));
-        client.focused_worktree_diff.store(
-            result["focused_worktree_diff"].as_bool().unwrap_or(false),
-            Ordering::Relaxed,
-        );
-        client.set_revision_review(result["revision_review"].as_bool().unwrap_or(false));
-        client.focused_revision_review.store(
-            result["focused_revision_review"].as_bool().unwrap_or(false),
-            Ordering::Relaxed,
-        );
-        client.set_commit_diff(result["commit_diff"].as_bool().unwrap_or(false));
-        client.switch_targets.store(
-            result["switch_targets"].as_bool().unwrap_or(false),
-            Ordering::Relaxed,
-        );
         Ok(client)
     }
 
-    pub fn start(extension_dir: &Path, executable: &Path) -> Result<Arc<Self>, Error> {
-        use std::path::Component;
-        if executable.as_os_str().is_empty()
-            || executable
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(Error::transport(
-                "The provider executable must be inside the installed extension.",
-            ));
-        }
-        let canonical = |path: &Path| {
-            path.canonicalize()
-                .map_err(|error| Error::transport(error.to_string()))
-        };
-        let extension_dir = canonical(extension_dir)?;
-        let executable = canonical(&extension_dir.join(executable))?;
-        if !executable.starts_with(&extension_dir) {
-            return Err(Error::transport(
-                "The provider executable points outside the installed extension.",
-            ));
-        }
-        let mut child = new_command(executable)
+    fn start(extension_dir: &Path) -> Result<Arc<Self>, Error> {
+        let mut child = new_command(provider_executable(extension_dir)?)
             // A development extension may live in a macOS-protected folder.
             // Relaunching the IDE does not carry transient folder access.
             .current_dir(paths::data_dir())
@@ -163,49 +134,7 @@ impl Client {
             outgoing: Some(outgoing),
             pending,
             next: AtomicU64::new(1),
-            worktree_diff: AtomicBool::new(false),
-            focused_worktree_diff: AtomicBool::new(false),
-            commit_diff: AtomicBool::new(false),
-            revision_review: AtomicBool::new(false),
-            focused_revision_review: AtomicBool::new(false),
-            switch_targets: AtomicBool::new(false),
         }))
-    }
-
-    pub(super) fn set_worktree_diff(&self, available: bool) {
-        self.worktree_diff.store(available, Ordering::Relaxed);
-    }
-
-    pub(super) fn has_worktree_diff(&self) -> bool {
-        self.worktree_diff.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn has_focused_worktree_diff(&self) -> bool {
-        self.focused_worktree_diff.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn set_commit_diff(&self, available: bool) {
-        self.commit_diff.store(available, Ordering::Relaxed);
-    }
-
-    pub(super) fn has_commit_diff(&self) -> bool {
-        self.commit_diff.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn set_revision_review(&self, available: bool) {
-        self.revision_review.store(available, Ordering::Relaxed);
-    }
-
-    pub(super) fn has_revision_review(&self) -> bool {
-        self.revision_review.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn has_focused_revision_review(&self) -> bool {
-        self.focused_revision_review.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn has_switch_targets(&self) -> bool {
-        self.switch_targets.load(Ordering::Relaxed)
     }
 
     pub fn next_id(&self) -> u64 {

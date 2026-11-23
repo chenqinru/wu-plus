@@ -13,12 +13,6 @@ impl Addon for Attachment {
     }
 }
 
-pub(in crate::wu) fn has_svn_blame(editor: &Editor, cx: &App) -> bool {
-    editor
-        .addon::<Attachment>()
-        .is_some_and(|attachment| attachment.0.read(cx).source.is_some())
-}
-
 #[derive(Clone)]
 struct Source {
     root: PathBuf,
@@ -34,7 +28,7 @@ struct FileHistory {
     path: PathBuf,
     source: Option<Source>,
     base: Option<Arc<str>>,
-    installed_diff: bool,
+    installed_diff: Option<gpui::EntityId>,
     wants_blame: bool,
     locate: Option<Task<()>>,
     read_base: Option<Task<()>>,
@@ -44,6 +38,36 @@ struct FileHistory {
 }
 
 impl SvnPanel {
+    pub(super) fn recheck_editor_locations(
+        &self,
+        changed_roots: &BTreeSet<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editors = self
+            .editor_attachments(cx)
+            .into_iter()
+            .filter(|state| {
+                let state = state.read(cx);
+                changed_roots.iter().any(|root| {
+                    state.path.starts_with(root)
+                        || state.source.as_ref().is_some_and(|source| &source.root == root)
+                })
+            })
+            .collect::<Vec<_>>();
+        if editors.is_empty() {
+            return;
+        }
+        window.defer(cx, move |window, cx| {
+            for state in editors {
+                state.update(cx, |state, cx| {
+                    state.detach(window, cx);
+                    state.locate(window, cx);
+                });
+            }
+        });
+    }
+
     pub(super) fn bind_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -120,7 +144,7 @@ impl SvnPanel {
                 path,
                 source: None,
                 base: None,
-                installed_diff: false,
+                installed_diff: None,
                 wants_blame: false,
                 locate: None,
                 read_base: None,
@@ -296,7 +320,7 @@ impl FileHistory {
                 state
                     .update(cx, |state, cx| {
                         state.base = Some(base);
-                        state.installed_diff = true;
+                        state.installed_diff = Some(diff.entity_id());
                         state
                             .editor
                             .update(cx, |editor, cx| {
@@ -319,7 +343,7 @@ impl FileHistory {
     }
 
     fn recalculate(&mut self, cx: &mut Context<Self>) {
-        let Some(base) = self.base.clone() else {
+        let (Some(base), Some(installed_diff)) = (self.base.clone(), self.installed_diff) else {
             return;
         };
         let editor = self.editor.clone();
@@ -335,6 +359,7 @@ impl FileHistory {
                         .buffer()
                         .read(cx)
                         .diff_for(buffer.read(cx).remote_id())
+                        .filter(|diff| diff.entity_id() == installed_diff)
                 })
                 .ok()
                 .flatten();
@@ -347,10 +372,9 @@ impl FileHistory {
     }
 
     fn clear_diff(&mut self, cx: &mut Context<Self>) {
-        if !self.installed_diff {
+        let Some(installed_diff) = self.installed_diff.take() else {
             return;
-        }
-        self.installed_diff = false;
+        };
         self.recalculate.take();
         let buffer = self.buffer.read(cx);
         let text = buffer.text_snapshot();
@@ -364,9 +388,14 @@ impl FileHistory {
             .editor
             .update(cx, |editor, cx| {
                 editor.set_diff_hunk_renderer(None, cx);
-                editor.buffer().read(cx).diff_for(id).map(|diff| {
-                    diff.update(cx, |diff, cx| diff.set_base_text(Some(base), text, cx))
-                })
+                editor
+                    .buffer()
+                    .read(cx)
+                    .diff_for(id)
+                    .filter(|diff| diff.entity_id() == installed_diff)
+                    .map(|diff| {
+                        diff.update(cx, |diff, cx| diff.set_base_text(Some(base), text, cx))
+                    })
             })
             .ok()
             .flatten();
@@ -395,11 +424,16 @@ impl FileHistory {
             return;
         };
         self.wants_blame = true;
-        let auth = self.panel.read_with(cx, |panel, _| {
-            panel.credentials.get(&source.root).map(|credentials| json!({
-                "username":credentials.username, "password":credentials.password, "remember":credentials.remember,
-            }))
-        }).ok().flatten();
+        let auth = self
+            .panel
+            .read_with(cx, |panel, _| {
+                panel
+                    .credentials
+                    .get(&source.root)
+                    .map(|credentials| json!(credentials))
+            })
+            .ok()
+            .flatten();
         let mut params = json!({
             "operation":"blame", "root":source.root, "path":source.path, "editor":true,
         });

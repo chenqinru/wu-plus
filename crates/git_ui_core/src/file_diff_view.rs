@@ -5,11 +5,12 @@ use buffer_diff::BufferDiff;
 use editor::{
     DiffStyleControls, Editor, EditorEvent, EditorSettings, HiddenUnstagedDiffHunkRenderer,
     MultiBuffer, SplittableEditor,
+    actions::{GoToHunk, GoToPreviousHunk},
 };
 use futures::{FutureExt, select_biased};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-    Font, IntoElement, Render, Task, WeakEntity, Window,
+    Action, App, AppContext as _, AsyncApp, Context, Empty, Entity, EventEmitter, FocusHandle,
+    Focusable, Font, IntoElement, Render, Task, WeakEntity, Window,
 };
 use i18n::t;
 use language::{Buffer, HighlightedText, Point};
@@ -23,7 +24,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use ui::{Color, Icon, IconName, SharedString, prelude::*};
+use ui::{Color, Icon, IconName, SharedString, Tooltip, prelude::*};
 use util::paths::PathExt as _;
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -454,6 +455,56 @@ impl Render for FileDiffView {
     }
 }
 
+#[derive(gpui::IntoElement)]
+pub struct DiffHunkNavigation {
+    focus: FocusHandle,
+    enabled: bool,
+}
+
+impl DiffHunkNavigation {
+    pub fn new(focus: FocusHandle, enabled: bool) -> Self {
+        Self { focus, enabled }
+    }
+
+    fn button(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        title: impl Into<SharedString>,
+        action: impl Action,
+    ) -> IconButton {
+        let focus = self.focus.clone();
+        let title: SharedString = title.into();
+        IconButton::new(id, icon)
+            .icon_size(IconSize::Small)
+            .disabled(!self.enabled)
+            .tooltip(Tooltip::for_action_title_in(title, &action, &focus))
+            .on_click(move |_, window, cx| {
+                focus.focus(window, cx);
+                let action = action.boxed_clone();
+                cx.defer(move |cx| cx.dispatch_action(action.as_ref()));
+            })
+    }
+}
+
+impl RenderOnce for DiffHunkNavigation {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        ui::h_group_sm()
+            .child(self.button(
+                "previous-hunk",
+                IconName::ArrowUp,
+                t!("Go to Previous Hunk"),
+                GoToPreviousHunk,
+            ))
+            .child(self.button(
+                "next-hunk",
+                IconName::ArrowDown,
+                t!("Go to Next Hunk"),
+                GoToHunk,
+            ))
+    }
+}
+
 pub struct FileDiffStyleToolbar {
     file_diff: Option<WeakEntity<FileDiffView>>,
 }
@@ -511,35 +562,7 @@ impl Render for FileDiffStyleToolbar {
                 )
             })
             .when(file_diff.snapshot_labels.is_some(), |toolbar| {
-                toolbar.children(
-                    [
-                        (
-                            "previous-hunk",
-                            IconName::ArrowUp,
-                            t!("Previous Hunk"),
-                            "editor::GoToPreviousHunk",
-                        ),
-                        (
-                            "next-hunk",
-                            IconName::ArrowDown,
-                            t!("Next Hunk"),
-                            "editor::GoToHunk",
-                        ),
-                    ]
-                    .into_iter()
-                    .map(|(id, icon, label, action)| {
-                        let rhs = rhs.clone();
-                        IconButton::new(id, icon)
-                            .icon_size(IconSize::Small)
-                            .tooltip(ui::Tooltip::text(label))
-                            .on_click(move |_, window, cx| {
-                                rhs.focus_handle(cx).focus(window, cx);
-                                if let Ok(action) = cx.build_action(action, None) {
-                                    window.dispatch_action(action, cx);
-                                }
-                            })
-                    }),
-                )
+                toolbar.child(DiffHunkNavigation::new(rhs.focus_handle(cx), true))
             })
             .into_any_element()
     }

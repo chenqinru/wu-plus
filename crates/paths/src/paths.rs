@@ -19,7 +19,7 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 pub const APP_NAME: &str = "Wu Plus";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
-/// Linux/FreeBSD and the macOS `~/.config` fallback.
+/// Linux/FreeBSD and the `~/.config` fallback.
 pub const APP_NAME_LOWERCASE: &str = {
     assert!(!APP_NAME.is_empty(), "APP_NAME must not be empty");
     assert!(APP_NAME.as_bytes().is_ascii(), "APP_NAME must be ASCII");
@@ -54,16 +54,12 @@ static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/Library/Application Support/Wu`.
-/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/wu`.
-/// On Windows, this is `%LOCALAPPDATA%\Wu`.
+/// On macOS, this is `~/Library/Application Support/Wu Plus`.
 static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/.config/wu`.
-/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/wu`.
-/// On Windows, this is `%APPDATA%\Wu`.
+/// On macOS, this is the `config` subdirectory of the data directory.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the wu_server directory on the ssh host.
@@ -135,21 +131,31 @@ pub fn custom_data_dir() -> Option<&'static PathBuf> {
 /// default data directory is in use. Shared by the app and the CLI so both
 /// derive the same instance identity.
 pub fn custom_data_dir_instance_hash() -> Option<u64> {
+    custom_data_dir().map(|dir| hash_data_dir(dir))
+}
+
+/// On macOS the default profile also needs its own identity alongside Wu.
+#[cfg(target_os = "macos")]
+pub fn macos_data_dir_instance_hash() -> u64 {
+    hash_data_dir(data_dir())
+}
+
+fn hash_data_dir(dir: &Path) -> u64 {
     // FNV-1a: deterministic across builds, unlike `DefaultHasher`, so an
     // older running instance and a newer launcher agree on the identity.
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in custom_data_dir()?.to_string_lossy().bytes() {
+    for byte in dir.to_string_lossy().bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    Some(hash)
+    hash
 }
 
 /// Returns the path to the configuration directory used by Wu.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
-        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
-            custom_dir.join("config")
+        if cfg!(target_os = "macos") || custom_data_dir().is_some() {
+            data_dir().join("config")
         } else if cfg!(target_os = "windows") {
             dirs::config_dir()
                 .expect("failed to determine RoamingAppData directory")
@@ -173,9 +179,9 @@ pub fn data_dir() -> &'static PathBuf {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
         } else if cfg!(target_os = "macos") {
-            home_dir()
-                .join("Library/Application Support")
-                .join(APP_NAME)
+            let support = home_dir().join("Library/Application Support");
+            let dir = support.canonicalize().unwrap_or(support).join(APP_NAME);
+            dir.canonicalize().unwrap_or(dir)
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
                 flatpak_xdg_data.into()
@@ -196,11 +202,8 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
-        if let Some(custom_dir) = custom_data_dir() {
-            return custom_dir.join("state");
-        }
-        if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join(APP_NAME);
+        if cfg!(target_os = "macos") || custom_data_dir().is_some() {
+            return data_dir().join("state");
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -223,13 +226,8 @@ pub fn state_dir() -> &'static PathBuf {
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
-        if let Some(custom_dir) = custom_data_dir() {
-            return custom_dir.join("cache");
-        }
-        if cfg!(target_os = "macos") {
-            return dirs::cache_dir()
-                .expect("failed to determine cachesDirectory directory")
-                .join(APP_NAME);
+        if cfg!(target_os = "macos") || custom_data_dir().is_some() {
+            return data_dir().join("cache");
         }
 
         if cfg!(target_os = "windows") {
@@ -254,15 +252,7 @@ pub fn temp_dir() -> &'static PathBuf {
 /// Returns the path to the logs directory.
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
-    LOGS_DIR.get_or_init(|| {
-        if let Some(custom_dir) = custom_data_dir() {
-            custom_dir.join("logs")
-        } else if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs").join(APP_NAME)
-        } else {
-            data_dir().join("logs")
-        }
-    })
+    LOGS_DIR.get_or_init(|| data_dir().join("logs"))
 }
 
 /// Returns the path to the Wu server directory on this SSH host.
@@ -701,4 +691,24 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
     GLOBAL_GITIGNORE_PATH
         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
         .clone()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_default_keeps_the_wu_plus_profile_layout() {
+        assert_eq!(custom_data_dir(), None);
+        let profile = data_dir();
+        assert_eq!(profile.file_name(), Some(APP_NAME.as_ref()));
+        assert_eq!(config_dir(), &profile.join("config"));
+        assert_eq!(state_dir(), &profile.join("state"));
+        assert_eq!(temp_dir(), &profile.join("cache"));
+        assert_eq!(logs_dir(), &profile.join("logs"));
+        assert_ne!(
+            macos_data_dir_instance_hash(),
+            hash_data_dir(&profile.with_file_name("Wu"))
+        );
+    }
 }

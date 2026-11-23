@@ -29,6 +29,12 @@ pub(super) struct Form {
     with_externals: bool,
 }
 
+impl Form {
+    pub(super) fn first_field_id(&self) -> Option<gpui::EntityId> {
+        self.fields.first().map(|(_, field)| field.entity_id())
+    }
+}
+
 impl Kind {
     pub(super) fn label(self) -> SharedString {
         match self {
@@ -268,6 +274,7 @@ impl SvnPanel {
         }
         if kind == Kind::Credentials {
             if let Some(root) = self.selected_root.clone() {
+                self.history_requests.invalidate(&root);
                 if let Some(username) = params["username"].as_str() {
                     self.credentials.insert(
                         root,
@@ -309,7 +316,15 @@ impl SvnPanel {
             }
             Kind::Update => ("write", "update", Output::Change, true),
             Kind::DiffRevision => ("read", "diff", Output::Diff, false),
-            Kind::History => ("read", "history", Output::History { append: false }, false),
+            Kind::History => {
+                self.error_kind = None;
+                self.certificate_target = None;
+                self.history.open(&form.path);
+                let close_form = if alternate { None } else { form.first_field_id() };
+                self.form = Some(form);
+                self.load_history_page(false, params["before"].as_str(), close_form, window, cx);
+                return;
+            }
             Kind::Blame => ("read", "blame", Output::Blame, false),
             Kind::Branches => ("read", "branches", Output::Text, false),
             Kind::CopyBranch => ("write", "copy_branch", Output::Change, true),
@@ -335,9 +350,6 @@ impl SvnPanel {
         }
         params["operation"] = json!(operation);
         params["close_form"] = json!(!alternate);
-        if kind == Kind::History {
-            self.history.open(&form.path);
-        }
         if confirm {
             let mut targets = form.paths.clone();
             if let Some(destination) = params["destination"]
@@ -363,11 +375,12 @@ impl SvnPanel {
     }
 
     pub(super) fn render_form(&self, form: &Form, cx: &mut Context<Self>) -> AnyElement {
+        let disabled = self.busy || (form.kind == Kind::History && self.history.is_loading());
         let cancel = if self.busy && self.repo().is_none() {
             self.cancel_operation(cx).into_any_element()
         } else {
             Button::new("svn-cancel-form", t!("Cancel"))
-                .disabled(self.busy)
+                .disabled(disabled)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.form = None;
                     cx.notify();
@@ -473,7 +486,7 @@ impl SvnPanel {
                     .child(
                         Button::new("svn-submit", t!("Apply"))
                             .style(ButtonStyle::Filled)
-                            .disabled(self.busy)
+                            .disabled(disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.submit_form(false, window, cx)
                             })),
@@ -481,7 +494,7 @@ impl SvnPanel {
                     .when(merge, |element| {
                         element.child(
                             Button::new("svn-preview-merge", t!("Preview Merge"))
-                                .disabled(self.busy)
+                                .disabled(disabled)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_form(true, window, cx)
                                 })),
@@ -493,7 +506,7 @@ impl SvnPanel {
                                 "svn-form-verify-certificate",
                                 t!("Verify SVN Server Certificate"),
                             )
-                            .disabled(self.busy)
+                            .disabled(disabled)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.certificate(window, cx)),
                             ),

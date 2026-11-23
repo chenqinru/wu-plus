@@ -1,1 +1,1 @@
-See [ReadMe](https://github.com/dstrml/wu#download) for installation instructions.
+See the [Wu Plus installation instructions](https://github.com/chenqinru/wu-plus#安装与使用).

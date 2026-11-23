@@ -105,17 +105,14 @@ fi
 cargo --config .cargo/bundle-config.toml build ${build_flag} ${remote_server_features} --package remote_server --target $target_triple
 
 echo "Creating application bundle"
-pushd crates/wu
-cp Cargo.toml Cargo.toml.backup
-sed \
-    -i.backup \
-    "s/package.metadata.bundle-${channel}/package.metadata.bundle/" \
-    Cargo.toml
-
-app_path=$(cargo bundle ${build_flag} --target $target_triple --select-workspace-root | xargs)
-
-mv Cargo.toml.backup Cargo.toml
-popd
+app_path=$(
+    set -e
+    cd crates/wu
+    cp Cargo.toml Cargo.toml.backup
+    trap 'mv Cargo.toml.backup Cargo.toml' EXIT
+    sed -i '' "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+    cargo bundle ${build_flag} --target $target_triple --select-workspace-root | xargs
+)
 echo "Bundled ${app_path}"
 
 # DocumentTypes.plist references CFBundleTypeIconFile "Document", so the bundle must contain Document.icns.

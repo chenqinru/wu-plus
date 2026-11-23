@@ -192,7 +192,7 @@ impl ReleaseChannel {
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Wu Plus",
+            ReleaseChannel::Dev => "Wu Plus Dev",
             ReleaseChannel::Stable => "Wu Plus",
         }
     }
@@ -210,7 +210,7 @@ impl ReleaseChannel {
     /// This also has to match the bundle identifier for Zed on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "io.github.chenqinru.wu-plus",
+            ReleaseChannel::Dev => "io.github.chenqinru.wu-plus-dev",
             ReleaseChannel::Stable => "io.github.chenqinru.wu-plus",
         }
     }

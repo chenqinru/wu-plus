@@ -295,9 +295,9 @@ impl Render for QuickActionBar {
                 .with_handle(self.toggle_settings_handle.clone())
                 .menu(move |window, cx| {
                     let (svn_blame, inline_blame_enabled, show_blame_gutter) = editor
-                        .read_with(cx, |editor, cx| {
+                        .read_with(cx, |editor, _| {
                             (
-                                super::svn_panel::editor_support::has_svn_blame(editor, cx),
+                                editor.has_external_blame_provider(),
                                 editor.git_blame_inline_enabled(),
                                 editor.show_git_blame_gutter(),
                             )

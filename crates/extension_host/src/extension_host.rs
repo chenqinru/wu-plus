@@ -551,20 +551,6 @@ impl ExtensionStore {
         &self.outstanding_operations
     }
 
-    /// Native providers execute outside the WASM sandbox. Only explicitly
-    /// installed local development extensions are eligible.
-    pub fn native_version_control(
-        &self,
-        id: &str,
-    ) -> Option<(PathBuf, extension::NativeVersionControlManifestEntry)> {
-        let entry = self.extension_index.extensions.get(id)?;
-        if !entry.dev {
-            return None;
-        }
-        let provider = entry.manifest.version_control.clone()?;
-        Some((self.installed_dir.join(id), provider))
-    }
-
     pub fn installed_extensions(&self) -> &BTreeMap<Arc<str>, ExtensionIndexEntry> {
         &self.extension_index.extensions
     }

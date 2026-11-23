@@ -23,9 +23,9 @@ brew install lld cmake pkgconf subversion
 scripts/wu.sh bundle
 ~~~
 
-开发期间可用 `scripts/wu.sh build` 构建本地二进制。生成带原生更新器的 macOS DMG 时运行 `scripts/wu.sh bundle`。此 Fork 以 Wu 官方 `v1.5.0` 为基线。构建直接使用当前检出的宿主源码，采用 Apple Silicon 的运行时 Metal 着色器路径。打包使用匹配版本的官方应用包提供上游资源与 Git 辅助程序，通过 `WU_PLUS_APP_TEMPLATE` 可指定该应用的位置。构建产物在 `dist/`，可通过 `WU_PLUS_DIST_DIR` 改写。只更新扩展时运行 `scripts/package-plugin.sh`，然后重启 Wu Plus 加载新的后台进程。应用和扩展使用本地临时签名。
+开发期间可用 `scripts/wu.sh build` 构建本地二进制。生成带原生更新器的 macOS DMG 时运行 `scripts/wu.sh bundle`，本地和 CI 都通过 Wu 的 `script/bundle-mac` 从当前源码打包。此 Fork 以 Wu 官方 `v1.5.0` 为基线，使用运行时 Metal 着色器。构建产物在 `dist/`，可通过 `WU_PLUS_DIST_DIR` 改写。只更新扩展时运行 `scripts/package-plugin.sh`，然后重启 Wu Plus 加载新的后台进程。默认使用本地临时签名。
 
-在 Wu 编辑器中打开仓库根目录，在调试视图选择「调试 Wu Plus」。启动前会构建宿主和 SVN 后台，自动注册开发扩展，并用 `.build/dev-profile` 启动调试实例。首次调试会下载并校验 CodeLLDB，后续使用项目内缓存，可以在宿主 Rust 源码中设置断点。
+在 Apple Silicon Mac 上打开仓库根目录，选择「调试 Wu Plus（Apple Silicon / SVN）」。启动前会构建宿主和 SVN 后台，自动注册开发扩展，并用 `.build/dev-profile` 启动调试实例。该配置首次启动时下载并校验 CodeLLDB，后续使用项目内缓存。跨平台的「Debug Wu Plus (CodeLLDB)」沿用 Wu 原生的 Cargo 调试配置和调试器查找方式。
 
 ~~~bash
 cargo test --locked --manifest-path plugin/Cargo.toml
@@ -46,11 +46,11 @@ scripts/wu.sh check v1.5.0
 scripts/wu.sh bundle v1.5.0
 ~~~
 
-上游发布新版后，先在集成分支将对应提交合入 Wu Plus，并同步更新 `scripts/wu-upstream.json` 中的上游标签、提交和官方 DMG 摘要。验收后再触发候选构建。脚本直接检查和构建当前 Git 检出，并运行 Subversion 集成测试。新包交付前，使用独立配置验收。升级日常配置前保留数据目录副本，以便数据格式变化后回退。
+上游发布新版后，先在集成分支将对应提交合入 Wu Plus，并同步更新 `scripts/wu-upstream.json` 中的上游标签和提交。验收后再触发候选构建。脚本直接检查和构建当前 Git 检出，并运行 Subversion 集成测试。新包交付前，使用独立配置验收。升级日常配置前保留数据目录副本，以便数据格式变化后回退。
 
-插件使用版本化的 JSON-RPC 2.0 标准输入输出接口。宿主通过 `initialize` 协商版本，通过 `discover`、`status`、`read`、`write` 调用业务操作，通过 `$/cancelRequest` 取消。Zed 的宿主适配推迟到 Wu 验收后。
+插件使用版本化的 JSON-RPC 2.0 标准输入输出接口。宿主从 Wu 的开发扩展列表加载 Subversion 后台，通过 `initialize` 校验协议版本，通过 `discover`、`status`、`read`、`write` 调用业务操作，通过 `$/cancelRequest` 取消。请用同一提交的宿主和扩展包。Zed 的宿主适配推迟到 Wu 验收后。
 
-许可条款见 [GPL](LICENSE-GPL) 和 [Apache License](LICENSE-APACHE)。Wu 上游源码和历史见 [dstrml/wu](https://github.com/dstrml/wu)。
+Wu 基于 Zed 开发。感谢 Wu 和 Zed 团队维护和开放源码。原生编辑器功能参见 [Wu 文档](https://wu.dstrml.org)，宿主开发参见 [Zed 开发文档](https://zed.dev/docs/development)。许可条款为 GPL-3.0-or-later，标注的组件使用 Apache-2.0。 [Wu 上游源码](https://github.com/dstrml/wu) · [GPL](LICENSE-GPL) · [Apache License](LICENSE-APACHE)
 
 ## 候选构建与应用内更新
 

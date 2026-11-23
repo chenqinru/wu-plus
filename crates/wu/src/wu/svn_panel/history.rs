@@ -1,5 +1,7 @@
 use super::*;
+use futures::future::WeakShared;
 use gpui::{DefiniteLength, MouseButton, ScrollStrategy, SharedString};
+use std::path::Path;
 use ui::{
     ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, HighlightedLabel,
     RedistributableColumnsState, Table, TableInteractionState, TableResizeBehavior,
@@ -15,17 +17,17 @@ pub(super) struct History {
     selected: Option<u64>,
     next_before: Option<u64>,
     loaded: bool,
-    pub(super) failed: bool,
+    failed: bool,
     loading: Option<Task<()>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Page {
     revisions: Vec<Revision>,
     next_before: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Revision {
     revision: u64,
     author: String,
@@ -34,14 +36,80 @@ struct Revision {
     paths: Vec<ChangedPath>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ChangedPath {
     path: String,
     kind: String,
     action: String,
 }
 
+type HistoryTask = Task<Result<Page, rpc::Error>>;
+
+#[derive(Default)]
+pub(super) struct Requests(BTreeMap<(PathBuf, String, Option<String>), WeakShared<HistoryTask>>);
+
+impl Requests {
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(super) fn invalidate(&mut self, root: &Path) {
+        self.0.retain(|(path, _, _), _| path != root);
+    }
+
+    fn share(
+        &mut self,
+        root: &Path,
+        path: &str,
+        before: Option<&str>,
+        start: impl FnOnce() -> HistoryTask,
+    ) -> Shared<HistoryTask> {
+        let key = (root.to_owned(), path.to_owned(), before.map(str::to_owned));
+        if let Some(request) = self.0.get(&key).and_then(WeakShared::upgrade) {
+            return request;
+        }
+        self.0.retain(|_, request| request.upgrade().is_some());
+        let request = start().shared();
+        if let Some(weak) = request.downgrade() {
+            self.0.insert(key, weak);
+        }
+        request
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn shares_matching_in_flight_history_until_invalidated() {
+        let mut requests = Requests::default();
+        let root = Path::new("/checkout");
+        let start = || {
+            Task::ready(Ok(Page {
+                revisions: Vec::new(),
+                next_before: None,
+            }))
+        };
+        let first = requests.share(root, ".", None, start);
+        let same = requests.share(root, ".", None, start);
+        let another_page = requests.share(root, ".", Some("1"), start);
+        let another_path = requests.share(root, "file.txt", None, start);
+        assert!(first.ptr_eq(&same));
+        assert!(!first.ptr_eq(&another_page));
+        assert!(!first.ptr_eq(&another_path));
+
+        requests.invalidate(root);
+        let refreshed = requests.share(root, ".", None, start);
+        assert!(!first.ptr_eq(&refreshed));
+    }
+}
+
 impl History {
+    pub(super) fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
     pub fn clear(&mut self) {
         self.path = ".".into();
         self.entries.clear();
@@ -58,7 +126,7 @@ impl History {
         self.visible = true;
     }
 
-    pub fn receive(&mut self, page: Page, append: bool) {
+    fn receive(&mut self, page: Page, append: bool) {
         if append {
             self.entries.extend(page.revisions);
         } else {
@@ -80,32 +148,37 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(root), Some(client)) = (self.selected_root.clone(), self.client.clone()) else {
+        let before = append
+            .then_some(self.history.next_before)
+            .flatten()
+            .map(|revision| revision.to_string());
+        self.load_history_page(append, before.as_deref(), None, window, cx);
+    }
+
+    pub(super) fn load_history_page(
+        &mut self,
+        append: bool,
+        before: Option<&str>,
+        close_form: Option<gpui::EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.selected_root.clone() else {
             return;
         };
         if append && self.history.loading.is_some() {
             return;
         }
         let path = if self.history.path.is_empty() {
-            "."
+            ".".to_owned()
         } else {
-            &self.history.path
+            self.history.path.clone()
         };
-        let before = append
-            .then_some(self.history.next_before)
-            .flatten()
-            .map(|revision| revision.to_string());
-        let params = self.repository_params(
-            &root,
-            json!({"operation":"history", "path":path, "before":before}),
-        );
+        let Some(task) = self.request_history(&root, &path, before, cx) else {
+            cx.notify();
+            return;
+        };
         self.history.failed = false;
-        let task = cx.background_spawn(async move {
-            client
-                .request(client.next_id(), "read", params)
-                .await
-                .and_then(|value| serde_json::from_value::<Page>(value).map_err(decode_error))
-        });
         self.history.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -114,7 +187,14 @@ impl SvnPanel {
                 }
                 this.history.loading = None;
                 match result {
-                    Ok(page) => this.history.receive(page, append),
+                    Ok(page) => {
+                        this.history.receive(page, append);
+                        if close_form.is_some()
+                            && this.form.as_ref().and_then(form::Form::first_field_id) == close_form
+                        {
+                            this.form = None;
+                        }
+                    }
                     Err(error) => {
                         this.history.failed = true;
                         let url = this.repo().map(|repo| repo.copy.url.clone());
@@ -127,16 +207,25 @@ impl SvnPanel {
         cx.notify();
     }
 
-    pub(super) fn repository_params(&self, root: &std::path::Path, mut params: Value) -> Value {
-        params["root"] = json!(root);
-        if let Some(credentials) = self.credentials.get(root) {
-            params["auth"] = json!({
-                "username": credentials.username,
-                "password": credentials.password,
-                "remember": credentials.remember,
-            });
-        }
-        params
+    fn request_history(
+        &mut self,
+        root: &Path,
+        path: &str,
+        before: Option<&str>,
+        cx: &App,
+    ) -> Option<Shared<HistoryTask>> {
+        let client = self.client.clone()?;
+        let before = before.filter(|revision| *revision != "HEAD");
+        let params = self.repository_params(
+            root,
+            json!({"operation":"history", "path":path, "before":before}),
+        );
+        Some(self.history_requests.share(root, path, before, || {
+            cx.background_spawn(async move {
+                let value = client.request(client.next_id(), "read", params).await?;
+                serde_json::from_value(value).map_err(decode_error)
+            })
+        }))
     }
 
     pub(super) fn reload_history_for(
@@ -145,14 +234,14 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.history_requests.invalidate(root);
         if self.selected_root.as_deref() == Some(root) {
             self.history.loaded = false;
             if self.history.visible {
                 self.load_history(false, window, cx);
             }
         }
-        let (Some(workspace), Some(client)) = (self.workspace.upgrade(), self.client.clone())
-        else {
+        let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
         let logs = workspace
@@ -164,19 +253,15 @@ impl SvnPanel {
             })
             .collect::<Vec<_>>();
         for (log, path) in logs {
-            let params = self.repository_params(root, json!({"operation":"history","path":path}));
-            log.update(cx, |log, cx| {
-                log.load(client.clone(), params, false, window, cx)
-            });
+            if let Some(task) = self.request_history(root, &path, None, cx) {
+                log.update(cx, |log, cx| log.load(task, false, window, cx));
+            }
         }
     }
 
     pub(super) fn open_log(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(root), Some(workspace), Some(client)) = (
-            self.selected_root.clone(),
-            self.workspace.upgrade(),
-            self.client.clone(),
-        ) else {
+        let (Some(root), Some(workspace)) = (self.selected_root.clone(), self.workspace.upgrade())
+        else {
             return;
         };
         let path = path.to_owned();
@@ -186,7 +271,6 @@ impl SvnPanel {
             .unwrap_or(root.as_os_str())
             .to_string_lossy()
             .into_owned();
-        let params = self.repository_params(&root, json!({"operation":"history", "path":path}));
         workspace.update(cx, |workspace, cx| {
             let existing = workspace.items_of_type::<LogView>(cx).find(|log| {
                 let log = log.read(cx);
@@ -196,45 +280,15 @@ impl SvnPanel {
                 workspace.activate_item(&existing, true, true, window, cx);
                 return;
             }
+            let Some(task) = self.request_history(&root, &path, None, cx) else {
+                return;
+            };
             let log = cx.new(|cx| LogView::new(panel, root, path, name, window, cx));
-            log.update(cx, |log, cx| log.load(client, params, false, window, cx));
+            log.update(cx, |log, cx| log.load(task, false, window, cx));
             let search = log.read(cx).search.focus_handle(cx);
             workspace.add_item_to_active_pane(Box::new(log), None, true, window, cx);
             search.focus(window, cx);
         });
-    }
-
-    fn open_revision_file(
-        &mut self,
-        root: PathBuf,
-        revision: u64,
-        path: String,
-        action: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.enabled || self.busy {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        if client.has_revision_review() {
-            self.open_revision(root, revision, Some(path), window, cx);
-            return;
-        }
-        let url = self
-            .repos
-            .iter()
-            .find(|repo| repo.copy.root == root)
-            .map(|repo| repo.copy.url.clone());
-        let params = self.repository_params(
-            &root,
-            json!({
-                "operation":"revision_file", "revision":revision, "path":path, "action":action,
-            }),
-        );
-        self.request_preview(client, Some(root), params, Output::Diff, url, window, cx);
     }
 
     fn open_revision(
@@ -245,17 +299,9 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
+        if !self.enabled || self.busy || self.client.is_none() {
             return;
         }
-        let Some(client) = self
-            .client
-            .as_ref()
-            .filter(|client| client.has_revision_review())
-        else {
-            return;
-        };
-        let supports_focus = client.has_focused_revision_review();
         let target = target.map(|path| path.trim_start_matches('/').to_owned());
         if let Some(complete) = preview::reveal_revision(
             &self.workspace,
@@ -288,7 +334,7 @@ impl SvnPanel {
             && *pending_root == root
             && *pending_revision == revision
         {
-            if !*focused && (target.is_none() || !supports_focus) {
+            if !*focused && target.is_none() {
                 *pending_target = target;
                 *background = false;
                 return;
@@ -297,7 +343,7 @@ impl SvnPanel {
                 return;
             }
         }
-        self.request_revision_review(root, revision, target, supports_focus, false, window, cx);
+        self.request_revision_review(root, revision, target, true, false, window, cx);
     }
 
     pub(super) fn request_revision_review(
@@ -627,16 +673,14 @@ impl SvnPanel {
                                                     )
                                                     .on_click(cx.listener({
                                                         let path = path.clone();
-                                                        let action = action.clone();
                                                         move |this, _, window, cx| {
                                                             if let Some(root) =
                                                                 this.selected_root.clone()
                                                             {
-                                                                this.open_revision_file(
+                                                                this.open_revision(
                                                                     root,
                                                                     revision,
-                                                                    path.clone(),
-                                                                    action.clone(),
+                                                                    Some(path.clone()),
                                                                     window,
                                                                     cx,
                                                                 );
@@ -763,42 +807,26 @@ impl LogView {
         if self.history.loading.is_some() {
             return;
         }
-        let before = if append {
-            self.history.next_before.map(|rev| rev.to_string())
-        } else {
-            None
-        };
-        let Ok(Some((client, params))) = self.panel.read_with(cx, |panel, _| {
-            panel.client.clone().map(|client| {
-                (
-                    client,
-                    panel.repository_params(
-                        &self.root,
-                        json!({"operation":"history","path":self.path,"before":before}),
-                    ),
-                )
-            })
+        let before = append
+            .then_some(self.history.next_before)
+            .flatten()
+            .map(|revision| revision.to_string());
+        let Ok(Some(task)) = self.panel.update(cx, |panel, cx| {
+            panel.request_history(&self.root, &self.path, before.as_deref(), cx)
         }) else {
             return;
         };
-        self.load(client, params, append, window, cx);
+        self.load(task, append, window, cx);
     }
 
     fn load(
         &mut self,
-        client: Arc<rpc::Client>,
-        params: Value,
+        task: Shared<HistoryTask>,
         append: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.error = None;
-        let task = cx.background_spawn(async move {
-            client
-                .request(client.next_id(), "read", params)
-                .await
-                .and_then(|value| serde_json::from_value::<Page>(value).map_err(decode_error))
-        });
         self.history.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -931,10 +959,7 @@ impl LogView {
             return;
         }
         let Ok(Some((client, params))) = self.panel.read_with(cx, |panel, _| {
-            let client = panel
-                .client
-                .clone()
-                .filter(|client| client.has_revision_review())?;
+            let client = panel.client.clone()?;
             let params = panel.repository_params(
                 &self.root,
                 json!({"operation":"revision_review","revision":revision}),
@@ -988,7 +1013,7 @@ impl LogView {
     fn open_commit(
         &self,
         revision: u64,
-        file: Option<(String, String)>,
+        file: Option<String>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -997,11 +1022,7 @@ impl LogView {
         // Pane activation deactivates the current item, which may be this log.
         window.defer(cx, move |window, cx| {
             let _ = panel.update(cx, |panel, cx| {
-                if let Some((path, action)) = file {
-                    panel.open_revision_file(root, revision, path, action, window, cx);
-                } else {
-                    panel.open_revision(root, revision, None, window, cx);
-                }
+                panel.open_revision(root, revision, file, window, cx);
             });
         });
     }
@@ -1042,13 +1063,7 @@ impl LogView {
 
     fn can_open_revision(&self, cx: &App) -> bool {
         self.panel
-            .read_with(cx, |panel, _| {
-                !panel.busy
-                    && panel
-                        .client
-                        .as_ref()
-                        .is_some_and(|client| client.has_revision_review())
-            })
+            .read_with(cx, |panel, _| !panel.busy && panel.client.is_some())
             .unwrap_or(false)
     }
 
@@ -1397,9 +1412,8 @@ impl LogView {
             )
             .when(openable, |row| {
                 let path = path.clone();
-                let action = action.clone();
                 row.on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_commit(revision, Some((path.clone(), action.clone())), window, cx);
+                    this.open_commit(revision, Some(path.clone()), window, cx);
                 }))
             });
         let log = cx.weak_entity();
@@ -1407,7 +1421,6 @@ impl LogView {
             .menu(move |window, cx| {
                 let copy_path = path.clone();
                 let path = path.clone();
-                let action = action.clone();
                 let log = log.clone();
                 ContextMenu::build(window, cx, |menu, _, _| {
                     menu.when(openable, |menu| {
@@ -1415,7 +1428,7 @@ impl LogView {
                             let _ = log.update(cx, |log, cx| {
                                 log.open_commit(
                                     revision,
-                                    Some((path.clone(), action.clone())),
+                                    Some(path.clone()),
                                     window,
                                     cx,
                                 );

@@ -401,9 +401,7 @@ pub fn handle(method: &str, params: Value, cancellation: &Cancellation) -> Resul
                     "Subversion requires SVN 1.14 or newer.",
                 ));
             }
-            Ok(
-                json!({"protocol_version":PROTOCOL_VERSION,"svn_version":version.trim(),"worktree_diff":true,"focused_worktree_diff":true,"commit_diff":true,"revision_review":true,"focused_revision_review":true,"switch_targets":true}),
-            )
+            Ok(json!({"protocol_version": PROTOCOL_VERSION, "svn_version": version.trim()}))
         }
         "discover" => read::discover(decode(params)?, cancellation),
         "status" => read::status(decode(params)?, cancellation),

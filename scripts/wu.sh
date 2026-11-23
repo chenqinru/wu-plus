@@ -20,18 +20,47 @@ if [[ $mode == build-dir ]]; then
   printf '%s\n' "$target/release-fast"
   exit 0
 fi
+if [[ $mode == prepare-debug && ( $(uname -s) != Darwin || $(uname -m) != arm64 ) ]]; then
+  printf '%s\n' '此启动配置需要 Apple Silicon Mac。其他平台请使用 Debug Wu Plus (CodeLLDB)。' >&2
+  exit 2
+fi
 
 if [[ ${WU_PLUS_INSTALL_RUST:-0} == 1 ]]; then
   rustup toolchain install "$toolchain" --profile minimal --component rust-src
 fi
 export CARGO_NET_GIT_FETCH_WITH_CLI=${CARGO_NET_GIT_FETCH_WITH_CLI:-true}
-export CARGO_TARGET_DIR="$target"
 export CARGO_INCREMENTAL=0
-if [[ $mode == bundle ]]; then
-  export ZED_RELEASE_CHANNEL=stable
-fi
 cd "$project"
 cargo "+$toolchain" --version >/dev/null
+if [[ $mode == bundle ]]; then
+  triple=$(rustc "+$toolchain" -vV | awk '/^host: / {print $2}')
+  case "$triple" in
+    aarch64-apple-darwin|x86_64-apple-darwin) ;;
+    *) printf '本地 DMG 打包需要 macOS，当前目标为 %s。\n' "$triple" >&2; exit 2 ;;
+  esac
+  CARGO_TARGET_DIR="$project/target" ZED_RELEASE_CHANNEL=stable script/bundle-mac "$triple"
+
+  artifact_dir=${WU_PLUS_DIST_DIR:-"$project/dist"}
+  bundle_dir="$project/target/$triple/release"
+  dmg="Wu-Plus-${triple%%-*}.dmg"
+  app='Wu Plus.app'
+  mkdir -p "$artifact_dir"
+  stage=$(mktemp -d "$artifact_dir/.bundle.XXXXXX")
+  trap 'rm -rf "$stage"' EXIT
+  ditto "$bundle_dir/dmg/$app" "$stage/$app"
+  cp "$bundle_dir/$dmg" "$stage/$dmg"
+  CARGO_BUILD_TARGET="$triple" scripts/package-plugin.sh "$artifact_dir"
+  if [[ -d "$artifact_dir/$app" ]]; then
+    previous=$(mktemp -d "$artifact_dir/previous.XXXXXX")
+    mv "$artifact_dir/$app" "$previous/"
+  fi
+  mv "$stage/$app" "$artifact_dir/$app"
+  mv -f "$stage/$dmg" "$artifact_dir/$dmg"
+  printf '%s\n' "$artifact_dir/$dmg"
+  exit 0
+fi
+
+export CARGO_TARGET_DIR="$target"
 common=(--locked --profile release-fast --jobs "${WU_PLUS_BUILD_JOBS:-6}" --package wu --package cli --features gpui_platform/runtime_shaders)
 if [[ $mode == check ]]; then
   cargo "+$toolchain" check "${common[@]}"
@@ -40,15 +69,12 @@ else
   cargo "+$toolchain" build "${common[@]}"
 fi
 case "$mode" in
-  bundle)
-    "$project/scripts/package.sh" "$target/release-fast" "$tag"
-    ;;
   prepare-debug)
     extension_dir="$project/.build/dev-extension"
     extension="$extension_dir/Subversion"
     installed_dir="$project/.build/dev-profile/extensions/installed"
     installed_extension="$installed_dir/wu-plus-subversion"
-    "$project/scripts/package-plugin.sh" "$extension_dir"
+    "$project/scripts/package-plugin.sh" --directory-only "$extension_dir"
     mkdir -p "$installed_dir"
     if [[ ! -e $installed_extension && ! -L $installed_extension ]]; then
       ln -sn "$extension" "$installed_extension"

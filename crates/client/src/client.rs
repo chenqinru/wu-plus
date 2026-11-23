@@ -688,7 +688,7 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the wu:// url scheme
+/// The URL scheme registered by Wu Plus.
 pub const ZED_URL_SCHEME: &str = "wu-plus";
 
 #[cfg(test)]

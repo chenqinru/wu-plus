@@ -1358,6 +1358,10 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn has_external_blame_provider(&self) -> bool {
+        self.external_blame_loader.is_some()
+    }
+
     pub fn set_external_blame_loader(
         &mut self,
         loader: Option<std::rc::Rc<dyn Fn(bool, &mut Window, &mut App)>>,

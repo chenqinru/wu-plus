@@ -16,7 +16,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(10);
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(35);
 const SEND_TIMEOUT: Duration = Duration::from_millis(20);
 const FORWARD_TIMEOUT: Duration = Duration::from_millis(250);
-const USER_BLOCK: u16 = 100;
 // Kept below the per-user ports, which start at 45737 and can reach 65534
 // for large user IDs.
 const DATA_DIR_PORT_BASE: u16 = 30000;
@@ -24,37 +23,9 @@ const DATA_DIR_PORT_RANGE: u16 = 10000;
 const MAX_FORWARDED_REQUEST_BYTES: u64 = 1024 * 1024;
 
 fn address() -> SocketAddr {
-    // These port numbers are offset by the user ID to avoid conflicts between
-    // different users on the same machine. In addition to that the ports for each
-    // release channel are spaced out by 100 to avoid conflicts between different
-    // users running different release channels on the same machine. This ends up
-    // interleaving the ports between different users and different release channels.
-    //
-    // On macOS user IDs start at 501 and on Linux they start at 1000. The first user
-    // on a Mac with ID 501 running a dev channel build will use port 46238, and the
-    // second user with ID 502 will use port 46239, and so on. The stable channel
-    // uses the next block of ports (46438 for user 501, 46439 for user 502, ...).
-    // Wu uses a different port range than Zed so both apps can run side by side
-    // without answering each other's single-instance handshake.
-    //
-    // A custom `--user-data-dir` is a separate instance, so it gets its own port
-    // derived from the data directory, below the per-user blocks.
-    let port = match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => 45737,
-        ReleaseChannel::Stable => 45737 + (2 * USER_BLOCK),
-    };
     let uid = unsafe { libc::getuid() };
-    let user_port = if let Some(data_dir_hash) = paths::custom_data_dir_instance_hash() {
-        let hash = data_dir_hash ^ u64::from(uid);
-        DATA_DIR_PORT_BASE + (hash % u64::from(DATA_DIR_PORT_RANGE)) as u16
-    } else {
-        // Ensure that the user ID is not too large to avoid overflow when
-        // calculating the port number. This seems unlikely but it doesn't
-        // hurt to be safe.
-        let max_port = 65535;
-        let max_uid: u32 = max_port - port as u32;
-        port + (uid % max_uid) as u16
-    };
+    let hash = paths::macos_data_dir_instance_hash() ^ u64::from(uid);
+    let user_port = DATA_DIR_PORT_BASE + (hash % u64::from(DATA_DIR_PORT_RANGE)) as u16;
 
     SocketAddr::V4(SocketAddrV4::new(LOCALHOST, user_port))
 }
@@ -64,10 +35,7 @@ fn instance_handshake() -> String {
         ReleaseChannel::Dev => "Wu Editor Dev Instance Running",
         ReleaseChannel::Stable => "Wu Editor Stable Instance Running",
     };
-    match paths::custom_data_dir_instance_hash() {
-        Some(hash) => format!("{handshake} {hash:x}"),
-        None => handshake.to_string(),
-    }
+    format!("{handshake} {:x}", paths::macos_data_dir_instance_hash())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -102,6 +102,16 @@ jobs:
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: script/bundle-mac "$TARGET_ARCH-apple-darwin"
+      - name: Check Simplified Chinese strings and commands
+        if: matrix.arch == 'aarch64'
+        run: script/check-translations --binary target/aarch64-apple-darwin/release/wu
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-debug-symbols-macos-${{ matrix.arch }}
+          path: target/${{ matrix.arch }}-apple-darwin/release/Wu.dSYM.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
       - name: Stage macOS release files
         env:
           TARGET_ARCH: ${{ matrix.arch }}
@@ -186,6 +196,9 @@ jobs:
     needs: [discover, bundle-macos, bundle-linux, bundle-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: wu-plus-bundle-*
@@ -195,9 +208,16 @@ jobs:
         env:
           VERSION: ${{ needs.discover.outputs.version }}
         run: |
+          upstream_tag=$(jq -er .tag scripts/wu-upstream.json)
+          {
+            cat .github/release/body.md
+            printf '\n## Upstream Wu %s\n\n' "$upstream_tag"
+            script/changelog-section "${upstream_tag#v}"
+          } > "$RUNNER_TEMP/RELEASE_NOTES.md"
           cd bundles
           printf '%s\n' "$VERSION" > version.txt
-          sha256sum version.txt \
+          cp "$RUNNER_TEMP/RELEASE_NOTES.md" .
+          sha256sum version.txt RELEASE_NOTES.md \
             Wu-Plus-{aarch64,x86_64}.dmg Wu-Plus-x86_64.exe \
             wu-plus-linux-{aarch64,x86_64}.tar.gz \
             wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz \
@@ -214,6 +234,7 @@ jobs:
           path: |
             ${{ runner.temp }}/SHA256SUMS
             ${{ runner.temp }}/version.txt
+            ${{ runner.temp }}/RELEASE_NOTES.md
           if-no-files-found: error
           overwrite: true
           retention-days: 30

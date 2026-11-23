@@ -88,7 +88,7 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
     #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Wu Plus`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Wu`.")]
+    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Wu Plus`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
         doc = "`$XDG_DATA_HOME/wu`."
@@ -1025,6 +1025,11 @@ mod flatpak {
     const EXTRA_LIB_ENV_NAME: &str = "ZED_FLATPAK_LIB_PATH";
     const NO_ESCAPE_ENV_NAME: &str = "ZED_FLATPAK_NO_ESCAPE";
 
+    fn is_wu_flatpak(id: &str) -> bool {
+        id.starts_with("me.farshed.Wu")
+            || matches!(id, "io.github.chenqinru.wu-plus" | "io.github.chenqinru.wu-plus-dev")
+    }
+
     fn restart_cli_args(flatpak_dir: &Path, invocation_args: &[OsString]) -> Vec<OsString> {
         let mut args = Vec::with_capacity(invocation_args.len() + 2);
 
@@ -1079,7 +1084,7 @@ mod flatpak {
 
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("me.farshed.Wu"))
+            && env::var("FLATPAK_ID").is_ok_and(|id| is_wu_flatpak(&id))
             && args.zed.is_none()
         {
             args.zed = Some("/app/libexec/wu-editor".into());
@@ -1094,7 +1099,7 @@ mod flatpak {
         }
 
         if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("me.farshed.Wu") {
+            if !is_wu_flatpak(&flatpak_id) {
                 return None;
             }
 

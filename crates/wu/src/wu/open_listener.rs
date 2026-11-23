@@ -131,11 +131,6 @@ impl OpenRequest {
         }
 
         for url in request.urls {
-            let url = if let Some(suffix) = url.strip_prefix("wu-plus://") {
-                format!("wu://{suffix}")
-            } else {
-                url
-            };
             if let Some(server_name) = url.strip_prefix("wu-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
@@ -144,31 +139,11 @@ impl OpenRequest {
                 });
             } else if let Some(file) = url.strip_prefix("file://") {
                 this.parse_file_path(file)
-            } else if let Some(file) = url.strip_prefix("wu://file") {
-                this.parse_file_path(file)
-            } else if let Some(file) = url.strip_prefix("wu://ssh") {
-                let ssh_url = "ssh:/".to_string() + file;
-                this.parse_ssh_file_path(&ssh_url, cx)?
-            } else if let Some(extension_id) = url.strip_prefix("wu://extension/") {
-                this.kind = Some(OpenRequestKind::Extension {
-                    extension_id: extension_id.to_string(),
-                });
-            } else if url == "wu://" || url == "wu://open" || url == "wu://open/" {
-                this.kind = Some(OpenRequestKind::FocusApp);
-            } else if let Some(schema_path) = url.strip_prefix("wu://schemas/") {
-                this.kind = Some(OpenRequestKind::BuiltinJsonSchema {
-                    schema_path: schema_path.to_string(),
-                });
-            } else if url == "wu://settings" || url == "wu://settings/" {
-                this.kind = Some(OpenRequestKind::Setting { setting_path: None });
-            } else if let Some(setting_path) = url.strip_prefix("wu://settings/") {
-                this.kind = Some(OpenRequestKind::Setting {
-                    setting_path: Some(setting_path.to_string()),
-                });
-            } else if let Some(clone_path) = url.strip_prefix("wu://git/clone") {
-                this.parse_git_clone_url(clone_path)?
-            } else if let Some(commit_path) = url.strip_prefix("wu://git/commit/") {
-                this.parse_git_commit_url(commit_path)?
+            } else if let Some(path) = url
+                .strip_prefix("wu-plus://")
+                .or_else(|| url.strip_prefix("wu://"))
+            {
+                this.parse_app_url(path, cx)?;
             } else if url.starts_with("ssh://") {
                 this.parse_ssh_file_path(&url, cx)?
             } else {
@@ -177,6 +152,37 @@ impl OpenRequest {
         }
 
         Ok(this)
+    }
+
+    fn parse_app_url(&mut self, path: &str, cx: &App) -> Result<()> {
+        if let Some(file) = path.strip_prefix("file") {
+            self.parse_file_path(file);
+        } else if let Some(file) = path.strip_prefix("ssh") {
+            self.parse_ssh_file_path(&format!("ssh:/{file}"), cx)?;
+        } else if let Some(extension_id) = path.strip_prefix("extension/") {
+            self.kind = Some(OpenRequestKind::Extension {
+                extension_id: extension_id.to_string(),
+            });
+        } else if matches!(path, "" | "open" | "open/") {
+            self.kind = Some(OpenRequestKind::FocusApp);
+        } else if let Some(schema_path) = path.strip_prefix("schemas/") {
+            self.kind = Some(OpenRequestKind::BuiltinJsonSchema {
+                schema_path: schema_path.to_string(),
+            });
+        } else if matches!(path, "settings" | "settings/") {
+            self.kind = Some(OpenRequestKind::Setting { setting_path: None });
+        } else if let Some(setting_path) = path.strip_prefix("settings/") {
+            self.kind = Some(OpenRequestKind::Setting {
+                setting_path: Some(setting_path.to_string()),
+            });
+        } else if let Some(clone_path) = path.strip_prefix("git/clone") {
+            self.parse_git_clone_url(clone_path)?;
+        } else if let Some(commit_path) = path.strip_prefix("git/commit/") {
+            self.parse_git_commit_url(commit_path)?;
+        } else {
+            log::error!("unhandled app URL path: {path}");
+        }
+        Ok(())
     }
 
     fn parse_file_path(&mut self, file: &str) {
@@ -1413,7 +1419,14 @@ mod tests {
     fn test_parse_focus_app_url(cx: &mut TestAppContext) {
         let _app_state = init_test(cx);
 
-        for url in ["wu://", "wu://open", "wu://open/"] {
+        for url in [
+            "wu://",
+            "wu://open",
+            "wu://open/",
+            "wu-plus://",
+            "wu-plus://open",
+            "wu-plus://open/",
+        ] {
             let request = cx.update(|cx| {
                 OpenRequest::parse(
                     RawOpenRequest {

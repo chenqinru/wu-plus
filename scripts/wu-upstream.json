@@ -1,8 +1,4 @@
 {
   "tag": "v1.5.0",
-  "revision": "a3ced2864abd933055b0d0afc5821e6cd9b0db2a",
-  "asset": {
-    "url": "https://github.com/dstrml/wu/releases/download/v1.5.0/Wu-aarch64.dmg",
-    "sha256": "4cb5ff4ce045327650a0edc776b00d1897c5bb93018a86ab9db702c45673e8c5"
-  }
+  "revision": "a3ced2864abd933055b0d0afc5821e6cd9b0db2a"
 }

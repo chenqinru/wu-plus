@@ -1,4 +1,5 @@
 use super::*;
+use git_ui_core::file_diff_view::DiffHunkNavigation;
 use gpui::SharedString;
 use language::{Buffer, Capability};
 use settings::Settings as _;
@@ -1464,15 +1465,6 @@ pub(in crate::wu) struct WorktreeDiffToolbar {
 }
 
 impl WorktreeDiffToolbar {
-    fn navigate(&self, action: &dyn Action, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = self.item.as_ref().and_then(WeakEntity::upgrade) {
-            let rhs = item.read(cx).editor.read(cx).rhs_editor().read(cx);
-            rhs.focus_handle(cx).focus(window, cx);
-            let action = action.boxed_clone();
-            cx.defer(move |cx| cx.dispatch_action(action.as_ref()));
-        }
-    }
-
     fn update_panel(
         &self,
         cx: &mut App,
@@ -1531,8 +1523,7 @@ impl workspace::ToolbarItemView for WorktreeDiffToolbar {
 
 impl Render for WorktreeDiffToolbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use editor::actions::{GoToHunk, GoToPreviousHunk};
-        use ui::{Divider, h_group_sm};
+        use ui::Divider;
 
         let Some(item) = self.item.as_ref().and_then(WeakEntity::upgrade) else {
             return gpui::Empty.into_any_element();
@@ -1575,7 +1566,6 @@ impl Render for WorktreeDiffToolbar {
         let multibuffer = diff.multibuffer.read(cx);
         let can_navigate = multibuffer.snapshot(cx).diff_hunks().next().is_some();
         let show_stats = !multibuffer.is_empty();
-        let focus = item.focus_handle(cx);
         let panel = diff.panel.upgrade();
         let panel = panel
             .as_ref()
@@ -1607,35 +1597,10 @@ impl Render for WorktreeDiffToolbar {
                     ))
                     .child(Divider::vertical().ml_1())
             })
-            .child(
-                h_group_sm()
-                    .child(
-                        IconButton::new("svn-worktree-prev", IconName::ArrowUp)
-                            .icon_size(IconSize::Small)
-                            .disabled(!can_navigate)
-                            .tooltip(Tooltip::for_action_title_in(
-                                t!("Go to Previous Hunk"),
-                                &GoToPreviousHunk,
-                                &focus,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.navigate(&GoToPreviousHunk, window, cx)
-                            })),
-                    )
-                    .child(
-                        IconButton::new("svn-worktree-next", IconName::ArrowDown)
-                            .icon_size(IconSize::Small)
-                            .disabled(!can_navigate)
-                            .tooltip(Tooltip::for_action_title_in(
-                                t!("Go to Next Hunk"),
-                                &GoToHunk,
-                                &focus,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.navigate(&GoToHunk, window, cx)
-                            })),
-                    ),
-            )
+            .child(DiffHunkNavigation::new(
+                diff.editor.read(cx).rhs_editor().focus_handle(cx),
+                can_navigate,
+            ))
             .child(Divider::vertical())
             .child(
                 Button::new("svn-worktree-select", t!("Include in SVN Commit"))

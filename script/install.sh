@@ -2,13 +2,35 @@
 set -eu
 
 # Downloads a Wu Plus release from GitHub and unpacks it into ~/.local/.
-# Optional: WU_VERSION=1.2.3 picks a release, WU_BUNDLE_PATH installs a local tarball.
+# Optional: WU_VERSION=1.2.3 picks a release, WU_BUNDLE_PATH installs a local package.
 # The ZED_ names of these variables still work for older instructions.
+
+cleanup() {
+    if [ "$dmg_mounted" = true ]; then
+        hdiutil detach "$mount_point" >/dev/null || return
+    fi
+    if [ -n "$mount_point" ] && [ -d "$mount_point" ]; then
+        rmdir "$mount_point"
+    fi
+    rm -rf "$temp"
+}
 
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${WU_CHANNEL:-${ZED_CHANNEL:-stable}}"
+    suffix=""
+    app_id="io.github.chenqinru.wu-plus"
+    mac_app="Wu Plus.app"
+    case "$channel" in
+        stable) ;;
+        dev)
+            suffix="-dev"
+            app_id="$app_id-dev"
+            mac_app="Wu Plus Dev.app"
+            ;;
+        *) echo "Unsupported release channel $channel" >&2; exit 1 ;;
+    esac
     repo="chenqinru/wu-plus"
     version="${WU_VERSION:-${ZED_VERSION:-latest}}"
     bundle_path="${WU_BUNDLE_PATH:-${ZED_BUNDLE_PATH:-}}"
@@ -19,10 +41,13 @@ main() {
     fi
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
-        temp="$(mktemp -d "$TMPDIR/wu-XXXXXX")"
+        temp="$(mktemp -d "$TMPDIR/wu-plus-XXXXXX")"
     else
-        temp="$(mktemp -d "/tmp/wu-XXXXXX")"
+        temp="$(mktemp -d "/tmp/wu-plus-XXXXXX")"
     fi
+    dmg_mounted=false
+    mount_point=""
+    trap cleanup EXIT
 
     if [ "$platform" = "Darwin" ]; then
         platform="macos"
@@ -46,28 +71,30 @@ main() {
             ;;
     esac
 
-    if command -v curl >/dev/null 2>&1; then
-        curl () {
-            command curl -fL "$@"
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        curl () {
-            wget -O- "$@"
-        }
-    else
-        echo "Could not find 'curl' or 'wget' in your path"
-        exit 1
+    if [ -z "$bundle_path" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl () {
+                command curl -fL "$@"
+            }
+        elif command -v wget >/dev/null 2>&1; then
+            curl () {
+                wget -O- "$@"
+            }
+        else
+            echo "Could not find 'curl' or 'wget' in your path"
+            exit 1
+        fi
     fi
 
     "$platform" "$@"
 
-    if [ "$(command -v wu-plus)" = "$HOME/.local/bin/wu-plus" ]; then
+    if [ "$(command -v wu-plus || true)" = "$HOME/.local/bin/wu-plus" ]; then
         echo "Wu Plus has been installed. Run with 'wu-plus'"
     else
         echo "To run Wu Plus from your terminal, you must add ~/.local/bin to your PATH"
         echo "Run:"
 
-        case "$SHELL" in
+        case "${SHELL:-sh}" in
             *zsh)
                 echo "   echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.zshrc"
                 echo "   source ~/.zshrc"
@@ -93,31 +120,18 @@ linux() {
         curl "$download_base/wu-plus-linux-$arch.tar.gz" > "$temp/wu-plus-linux-$arch.tar.gz"
     fi
 
-    suffix=""
-    if [ "$channel" != "stable" ]; then
-        suffix="-$channel"
-    fi
+    app="wu-plus$suffix.app"
+    install_dir="$HOME/.local/$app"
+    mkdir "$temp/unpacked"
+    tar -xzf "$temp/wu-plus-linux-$arch.tar.gz" -C "$temp/unpacked"
+    test -x "$temp/unpacked/$app/bin/wu-plus"
+    test -x "$temp/unpacked/$app/libexec/wu-editor"
+    test -f "$temp/unpacked/$app/share/applications/$app_id.desktop"
+    mkdir -p "$HOME/.local"
+    rm -rf "$install_dir"
+    mv "$temp/unpacked/$app" "$install_dir"
 
-    appid=""
-    case "$channel" in
-      stable)
-        appid="io.github.chenqinru.wu-plus"
-        ;;
-      dev)
-        appid="io.github.chenqinru.wu-plus-dev"
-        ;;
-      *)
-        echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="io.github.chenqinru.wu-plus"
-        ;;
-    esac
-
-    # Unpack
-    rm -rf "$HOME/.local/wu-plus$suffix.app"
-    mkdir -p "$HOME/.local/wu-plus$suffix.app"
-    tar -xzf "$temp/wu-plus-linux-$arch.tar.gz" -C "$HOME/.local/"
-
-    wu_editor="$HOME/.local/wu-plus$suffix.app/libexec/wu-editor"
+    wu_editor="$install_dir/libexec/wu-editor"
     if [ -f "$wu_editor" ] && command -v ldd >/dev/null 2>&1; then
         missing="$(ldd "$wu_editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
         if [ -n "$missing" ]; then
@@ -131,33 +145,44 @@ linux() {
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
     # Link the binary
-    ln -sf "$HOME/.local/wu-plus$suffix.app/bin/wu-plus" "$HOME/.local/bin/wu-plus"
+    ln -sf "$install_dir/bin/wu-plus" "$HOME/.local/bin/wu-plus"
 
     # Copy .desktop file
-    desktop_file_path="$HOME/.local/share/applications/${appid}.desktop"
-    src_dir="$HOME/.local/wu-plus$suffix.app/share/applications"
-    cp "$src_dir/${appid}.desktop" "${desktop_file_path}"
-    sed -i "s|Icon=wu-plus|Icon=$HOME/.local/wu-plus$suffix.app/share/icons/hicolor/512x512/apps/wu-plus.png|g" "${desktop_file_path}"
-    sed -i "s|Exec=wu-plus|Exec=$HOME/.local/wu-plus$suffix.app/bin/wu-plus|g" "${desktop_file_path}"
+    escaped_dir=$(printf '%s\n' "$install_dir" | sed 's/[\\&|]/\\&/g')
+    sed -e "s|^Icon=wu-plus$|Icon=$escaped_dir/share/icons/hicolor/512x512/apps/wu-plus.png|" \
+        -e "s|^TryExec=wu-plus$|TryExec=$escaped_dir/bin/wu-plus|" \
+        -e "s|^Exec=wu-plus |Exec=\"$escaped_dir/bin/wu-plus\" |" \
+        "$install_dir/share/applications/$app_id.desktop" \
+        > "$HOME/.local/share/applications/$app_id.desktop"
 }
 
 macos() {
-    echo "Downloading Wu Plus version: $version"
-    curl "$download_base/Wu-Plus-$arch.dmg" > "$temp/Wu-Plus-$arch.dmg"
-    hdiutil attach -quiet "$temp/Wu-Plus-$arch.dmg" -mountpoint "$temp/mount"
-    app="Wu Plus.app"
-    test -d "$temp/mount/$app"
-    echo "Installing $app"
-    if [ -d "/Applications/$app" ]; then
-        echo "Removing existing $app"
-        rm -rf "/Applications/$app"
+    if [ -n "$bundle_path" ]; then
+        cp "$bundle_path" "$temp/Wu-Plus-$arch.dmg"
+    else
+        echo "Downloading Wu Plus version: $version"
+        curl "$download_base/Wu-Plus-$arch.dmg" > "$temp/Wu-Plus-$arch.dmg"
     fi
-    ditto "$temp/mount/$app" "/Applications/$app"
-    hdiutil detach -quiet "$temp/mount"
+    # DiskImages cannot mount into temporary directories on some external volumes.
+    mount_point="$(mktemp -d /tmp/wu-plus-mount.XXXXXX)"
+    hdiutil attach -readonly -nobrowse "$temp/Wu-Plus-$arch.dmg" -mountpoint "$mount_point" >/dev/null
+    dmg_mounted=true
+    if [ ! -d "$mount_point/$mac_app" ]; then
+        echo "The disk image does not contain $mac_app." >&2
+        return 1
+    fi
+    echo "Installing $mac_app"
+    if [ -d "/Applications/$mac_app" ]; then
+        echo "Removing existing $mac_app"
+        rm -rf "/Applications/$mac_app"
+    fi
+    ditto "$mount_point/$mac_app" "/Applications/$mac_app"
+    hdiutil detach "$mount_point" >/dev/null
+    dmg_mounted=false
 
     mkdir -p "$HOME/.local/bin"
     # Link the binary
-    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/wu-plus"
+    ln -sf "/Applications/$mac_app/Contents/MacOS/cli" "$HOME/.local/bin/wu-plus"
 }
 
 main "$@"

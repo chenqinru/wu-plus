@@ -64,24 +64,6 @@ use crate::wu::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// Track the added icon even when the upstream embedded asset archive is cached.
-struct SvnAssets;
-
-impl gpui::AssetSource for SvnAssets {
-    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if path == "icons/subversion.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
-                "../../../assets/icons/subversion.svg"
-            ))));
-        }
-        gpui::AssetSource::load(&Assets, path)
-    }
-
-    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui::AssetSource::list(&Assets, path)
-    }
-}
-
 fn build_application() -> Application {
     let platform = gpui_platform::current_platform(false);
     if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
@@ -280,17 +262,7 @@ fn main() {
         return;
     }
 
-    #[cfg(target_os = "macos")]
-    let product_data_dir = paths::home_dir()
-        .join("Library/Application Support")
-        .join(paths::APP_NAME);
-    #[cfg(target_os = "macos")]
-    let default_data = Some(product_data_dir.to_string_lossy());
-    #[cfg(not(target_os = "macos"))]
-    let default_data: Option<std::borrow::Cow<'_, str>> = None;
-    let restart_arguments = if let Some(directory) =
-        args.user_data_dir.as_deref().or(default_data.as_deref())
-    {
+    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
         let directory = match paths::set_custom_data_dir(directory) {
             Ok(directory) => directory,
             Err(error) => {
@@ -379,7 +351,7 @@ fn main() {
     util::shell_env::refresh_windows_environment();
 
     let app = build_application()
-        .with_assets(SvnAssets)
+        .with_assets(Assets)
         .with_restart_arguments(restart_arguments);
 
     let (open_listener, mut open_rx) = OpenListener::new();
@@ -1461,7 +1433,7 @@ struct Args {
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `wu://` scheme, or relative to <https://zed.dev>.
+    /// URLs can use the `file://` or `wu-plus://` scheme.
     paths_or_urls: Vec<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
@@ -1473,8 +1445,8 @@ struct Args {
     ///
     /// This overrides the default platform-specific data directory location.
     /// On macOS, the default is `~/Library/Application Support/Wu Plus`.
-    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/wu`.
-    /// On Windows, the default is `%LOCALAPPDATA%\Wu`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/wu plus`.
+    /// On Windows, the default is `%LOCALAPPDATA%\Wu Plus`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 

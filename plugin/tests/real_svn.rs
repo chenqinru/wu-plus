@@ -237,12 +237,26 @@ fn reads_and_repository_operations_are_real() {
         root,
         json!({"operation":"history","path":"text.txt"}),
     );
-    assert!(log["text"].as_str().unwrap().contains("seed"));
+    assert_eq!(log["revisions"][0]["message"], "seed");
     let blame = root_request("read", root, json!({"operation":"blame","path":"text.txt"}));
-    assert!(blame["text"].as_str().unwrap().contains("original"));
+    assert_eq!(blame["text"], "");
     assert_eq!(blame["blame"]["content"], "original\nline two\n");
     assert_eq!(blame["blame"]["lines"][0]["line"], 1);
     assert_eq!(blame["blame"]["lines"][0]["revision"], "2");
+    let working_file = root.join("text.txt");
+    fs::write(&working_file, b"fallback\0\n").unwrap();
+    let fallback = root_request("read", root, json!({"operation":"blame","path":"text.txt"}));
+    assert!(fallback["blame"].is_null());
+    assert!(fallback["text"].as_str().unwrap().contains("fallback"));
+    fs::write(&working_file, "original\nline two\n").unwrap();
+    let history = root_request(
+        "read",
+        root,
+        json!({"operation":"history","path":".","before":"1"}),
+    );
+    let revisions = history["revisions"].as_array().unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0]["revision"], 1);
     root_request(
         "write",
         root,
@@ -538,7 +552,7 @@ fn provider_handshake_and_cancellation_use_stdio() {
     output.read_line(&mut reply).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&reply).unwrap()["result"]["protocol_version"],
-        1
+        wu_plus_subversion_provider::PROTOCOL_VERSION
     );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -822,15 +836,6 @@ fn native_diff_snapshots_and_history_file_changes() {
             && entry["action"] == "A"
             && entry["kind"] == "file"
     }));
-    let historical = root_request(
-        "read",
-        root,
-        json!({"operation":"revision_file","path":"/trunk/text.txt","revision":4,"action":"M"}),
-    );
-    assert_eq!(historical["file"]["base"], initial);
-    assert_eq!(historical["file"]["head"], working);
-    assert_eq!(historical["file"]["from"], "r3");
-    assert_eq!(historical["file"]["to"], "r4");
     let stats = root_request(
         "read",
         root,
@@ -868,6 +873,8 @@ fn native_diff_snapshots_and_history_file_changes() {
             .find(|file| file["path"] == "trunk/text.txt")
             .unwrap()])
     );
+    assert_eq!(focused_review["files"][0]["from"], "r3");
+    assert_eq!(focused_review["files"][0]["to"], "r4");
     assert_eq!(focused_review["other"], json!([]));
     assert_eq!(focused_review["message"], review["message"]);
     assert_eq!(focused_review["author"], review["author"]);
@@ -881,13 +888,14 @@ fn native_diff_snapshots_and_history_file_changes() {
     assert_eq!(layout["stats"], json!({"added":0,"deleted":0}));
     assert_eq!(layout["files"].as_array().unwrap().len(), 3);
 
-    let added = root_request(
-        "read",
-        root,
-        json!({"operation":"revision_file","path":format!("/trunk/{name}"),"revision":4,"action":"A"}),
-    );
-    assert_eq!(added["file"]["base"], "");
-    assert_eq!(added["file"]["head"], "added content\n");
+    let added = review["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == format!("trunk/{name}"))
+        .unwrap();
+    assert_eq!(added["base"], "");
+    assert_eq!(added["head"], "added content\n");
     root_request("write", root, json!({"operation":"delete","paths":[name]}));
     let deleted = root_request("read", root, json!({"operation":"diff","path":name}));
     assert_eq!(deleted["file"]["base"], "added content\n");
@@ -900,10 +908,10 @@ fn native_diff_snapshots_and_history_file_changes() {
     let deleted = root_request(
         "read",
         root,
-        json!({"operation":"revision_file","path":format!("/trunk/{name}"),"revision":5,"action":"D"}),
+        json!({"operation":"revision_review","revision":5,"include_files":true,"focus_path":format!("/trunk/{name}")}),
     );
-    assert_eq!(deleted["file"]["base"], "added content\n");
-    assert_eq!(deleted["file"]["head"], "");
+    assert_eq!(deleted["files"][0]["base"], "added content\n");
+    assert_eq!(deleted["files"][0]["head"], "");
 
     root_request(
         "write",
@@ -963,10 +971,13 @@ fn native_diff_snapshots_and_history_file_changes() {
     let historical = root_request(
         "read",
         root,
-        json!({"operation":"revision_file","path":"/trunk/text.txt","revision":6,"action":"M"}),
+        json!({"operation":"revision_review","revision":6,"include_files":true,"focus_path":"/trunk/text.txt"}),
     );
-    assert_eq!(historical["file"]["head"], "content and properties\n");
-    assert_eq!(historical["details"]["head"], "qa = review-ok\n");
+    let files = historical["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["head"], "content and properties\n");
+    assert_eq!(files[1]["kind"], "properties");
+    assert_eq!(files[1]["head"], "qa = review-ok\n");
 
     let moved = "renamed @.txt";
     root_request(
