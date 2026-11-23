@@ -6,6 +6,10 @@ pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
+#[cfg(target_os = "macos")]
+mod svn_panel;
+#[cfg(target_os = "macos")]
+pub mod sparkle_update;
 pub mod remote_debug;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;
@@ -662,6 +666,13 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(chat_panel, workspace_handle.clone(), cx.clone()),
         );
 
+        #[cfg(target_os = "macos")]
+        add_panel_when_ready(
+            svn_panel::SvnPanel::load(workspace_handle.clone(), cx.clone()),
+            workspace_handle.clone(),
+            cx.clone(),
+        ).await;
+
         workspace_handle.update(cx, |workspace, cx| {
             workspace.finish_dock_restoration(cx);
         })?;
@@ -676,6 +687,15 @@ fn register_actions(
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    #[cfg(target_os = "macos")]
+    workspace.register_action(|workspace, _: &svn_panel::TogglePanel, window, cx| {
+        if workspace
+            .panel::<svn_panel::SvnPanel>(cx)
+            .is_some_and(|panel| workspace::Panel::enabled(panel.read(cx), cx))
+        {
+            workspace.toggle_panel_focus::<svn_panel::SvnPanel>(window, cx);
+        }
+    });
     workspace
         .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
         .register_action(
@@ -978,7 +998,7 @@ fn register_actions(
                         Toast::new(
                             NotificationId::unique::<RegisterWuScheme>(),
                             t!(
-                                "wu:// links will now open in {app_name}.",
+                                "wu-plus:// links will now open in {app_name}.",
                                 app_name = ReleaseChannel::global(cx).display_name()
                             )
                             .to_string(),
@@ -989,7 +1009,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                &t!("Error registering wu:// scheme"),
+                &t!("Error registering wu-plus:// scheme"),
                 window,
                 cx,
                 |_, _, _| None,
@@ -1175,6 +1195,8 @@ fn initialize_pane(
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
             let file_diff_style_toolbar = cx.new(FileDiffStyleToolbar::new);
             toolbar.add_item(file_diff_style_toolbar, window, cx);
+            let svn_diff_navigation = cx.new(|_| svn_panel::preview::WorktreeDiffToolbar::default());
+            toolbar.add_item(svn_diff_navigation, window, cx);
             let breadcrumbs = cx.new(|_| Breadcrumbs::new());
             toolbar.add_item(breadcrumbs, window, cx);
             let buffer_search_bar = cx.new(|cx| {
@@ -1407,7 +1429,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some(t!("About Wu")),
+                title: Some(t!("About Wu Plus")),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),

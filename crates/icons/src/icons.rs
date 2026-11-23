@@ -227,6 +227,7 @@ pub enum IconName {
     SquarePlus,
     Star,
     Stop,
+    Subversion,
     Tab,
     Table,
     Terminal,

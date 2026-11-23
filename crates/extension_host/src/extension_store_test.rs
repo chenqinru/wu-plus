@@ -397,6 +397,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                         debug_adapters: Default::default(),
                         debug_locators: Default::default(),
                         language_model_providers: BTreeMap::default(),
+                        version_control: None,
                     }),
                     dev: false,
                 },
@@ -426,6 +427,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                         debug_adapters: Default::default(),
                         debug_locators: Default::default(),
                         language_model_providers: BTreeMap::default(),
+                        version_control: None,
                     }),
                     dev: false,
                 },
@@ -609,6 +611,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                 debug_adapters: Default::default(),
                 debug_locators: Default::default(),
                 language_model_providers: BTreeMap::default(),
+                version_control: None,
             }),
             dev: false,
         },
@@ -4170,6 +4173,7 @@ impl Extension for FakeExtension {
             debug_adapters: BTreeMap::default(),
             debug_locators: BTreeMap::default(),
             language_model_providers: BTreeMap::default(),
+            version_control: None,
         })
     }
 

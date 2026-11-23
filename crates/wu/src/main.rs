@@ -64,6 +64,24 @@ use crate::wu::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// Track the added icon even when the upstream embedded asset archive is cached.
+struct SvnAssets;
+
+impl gpui::AssetSource for SvnAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "icons/subversion.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../../../assets/icons/subversion.svg"
+            ))));
+        }
+        gpui::AssetSource::load(&Assets, path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        gpui::AssetSource::list(&Assets, path)
+    }
+}
+
 fn build_application() -> Application {
     let platform = gpui_platform::current_platform(false);
     if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
@@ -262,7 +280,15 @@ fn main() {
         return;
     }
 
-    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
+    #[cfg(target_os = "macos")]
+    let product_data_dir = paths::home_dir().join(wu::sparkle_update::data_directory());
+    #[cfg(target_os = "macos")]
+    let default_data = Some(product_data_dir.to_string_lossy());
+    #[cfg(not(target_os = "macos"))]
+    let default_data: Option<std::borrow::Cow<'_, str>> = None;
+    let restart_arguments = if let Some(directory) =
+        args.user_data_dir.as_deref().or(default_data.as_deref())
+    {
         let directory = match paths::set_custom_data_dir(directory) {
             Ok(directory) => directory,
             Err(error) => {
@@ -351,7 +377,7 @@ fn main() {
     util::shell_env::refresh_windows_environment();
 
     let app = build_application()
-        .with_assets(Assets)
+        .with_assets(SvnAssets)
         .with_restart_arguments(restart_arguments);
 
     let (open_listener, mut open_rx) = OpenListener::new();
@@ -588,6 +614,9 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
+        #[cfg(target_os = "macos")]
+        wu::sparkle_update::init(cx);
+        #[cfg(not(target_os = "macos"))]
         auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
@@ -1444,7 +1473,7 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
-    /// On macOS, the default is `~/Library/Application Support/Wu`.
+    /// On macOS, the default is `~/Library/Application Support/Wu Plus`.
     /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/wu`.
     /// On Windows, the default is `%LOCALAPPDATA%\Wu`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
@@ -1554,6 +1583,7 @@ fn parse_url_arg(arg: &str) -> String {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
             if arg.starts_with("file://")
+                || arg.starts_with("wu-plus://")
                 || arg.starts_with("wu://")
                 || arg.starts_with("wu-cli://")
                 || arg.starts_with("ssh://")

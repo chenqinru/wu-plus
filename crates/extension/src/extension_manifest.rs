@@ -116,6 +116,14 @@ pub struct ExtensionManifest {
     pub debug_locators: BTreeMap<Arc<str>, DebugLocatorManifestEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub language_model_providers: BTreeMap<Arc<str>, LanguageModelProviderManifestEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_control: Option<NativeVersionControlManifestEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct NativeVersionControlManifestEntry {
+    pub protocol_version: u64,
+    pub executable: String,
 }
 
 impl ExtensionManifest {
@@ -352,6 +360,7 @@ fn manifest_from_old_manifest(
         debug_adapters: Default::default(),
         debug_locators: Default::default(),
         language_model_providers: Default::default(),
+        version_control: None,
     }
 }
 
@@ -384,6 +393,7 @@ mod tests {
             debug_adapters: Default::default(),
             debug_locators: Default::default(),
             language_model_providers: BTreeMap::default(),
+            version_control: None,
         }
     }
 

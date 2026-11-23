@@ -106,8 +106,6 @@ impl Render for QuickActionBar {
             && editor_value.diagnostics_max_severity != DiagnosticSeverity::Off;
         let supports_inline_diagnostics = editor_value.inline_diagnostics_enabled();
         let inline_diagnostics_enabled = editor_value.show_inline_diagnostics();
-        let git_blame_inline_enabled = editor_value.git_blame_inline_enabled();
-        let show_git_blame_gutter = editor_value.show_git_blame_gutter();
         let auto_signature_help_enabled = editor_value.auto_signature_help_enabled(cx);
         let show_line_numbers = editor_value.line_numbers_enabled(cx);
         let supports_minimap = editor_value.supports_minimap(cx);
@@ -296,6 +294,15 @@ impl Render for QuickActionBar {
                 .anchor(Anchor::TopRight)
                 .with_handle(self.toggle_settings_handle.clone())
                 .menu(move |window, cx| {
+                    let (svn_blame, inline_blame_enabled, show_blame_gutter) = editor
+                        .read_with(cx, |editor, cx| {
+                            (
+                                super::svn_panel::editor_support::has_svn_blame(editor, cx),
+                                editor.git_blame_inline_enabled(),
+                                editor.show_git_blame_gutter(),
+                            )
+                        })
+                        .ok()?;
                     let menu = ContextMenu::build(window, cx, {
                         let focus_handle = editor_focus_handle.clone();
                         |mut menu, _, _| {
@@ -525,8 +532,12 @@ impl Render for QuickActionBar {
                             menu = menu.separator();
 
                             menu = menu.toggleable_entry(
-                                t!("Inline Git Blame"),
-                                git_blame_inline_enabled,
+                                if svn_blame {
+                                    t!("Inline SVN Blame")
+                                } else {
+                                    t!("Inline Git Blame")
+                                },
+                                inline_blame_enabled,
                                 IconPosition::Start,
                                 Some(editor::actions::ToggleGitBlameInline.boxed_clone()),
                                 {
@@ -546,8 +557,12 @@ impl Render for QuickActionBar {
                             );
 
                             menu = menu.toggleable_entry(
-                                t!("Column Git Blame"),
-                                show_git_blame_gutter,
+                                if svn_blame {
+                                    t!("Column SVN Blame")
+                                } else {
+                                    t!("Column Git Blame")
+                                },
+                                show_blame_gutter,
                                 IconPosition::Start,
                                 Some(git::Blame.boxed_clone()),
                                 {
@@ -566,7 +581,7 @@ impl Render for QuickActionBar {
                                 },
                             );
 
-                            if let Some(fs) = fs.clone() {
+                            if !svn_blame && let Some(fs) = fs.clone() {
                                 menu = menu.toggleable_entry(
                                     t!("Diff Against Default Branch"),
                                     diff_against_default_branch,
