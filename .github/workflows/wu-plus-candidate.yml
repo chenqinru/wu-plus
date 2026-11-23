@@ -17,114 +17,203 @@ defaults:
   run:
     shell: bash
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  ZED_RELEASE_CHANNEL: stable
+
 concurrency:
-  group: wu-plus-candidate
+  group: wu-plus-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   discover:
     runs-on: ubuntu-latest
     outputs:
-      name: ${{ steps.release.outputs.name }}
+      version: ${{ steps.release.outputs.version }}
       needed: ${{ steps.release.outputs.needed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - id: release
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_WU: ${{ inputs.wu_version }}
-          SIGNED: ${{ vars.WU_PLUS_SIGN_CANDIDATES }}
-          RELEASE_REPOSITORY: ${{ vars.WU_PLUS_RELEASE_REPOSITORY }}
         run: |
-          upstream=scripts/wu-upstream.json
-          tag=$(jq -er .tag "$upstream")
-          revision=$(jq -er .revision "$upstream")
+          tag=$(jq -er .tag scripts/wu-upstream.json)
+          revision=$(jq -er .revision scripts/wu-upstream.json)
+          git merge-base --is-ancestor "$revision" "$GITHUB_SHA"
+          version=$(awk -F '"' '/^version = / {print $2; exit}' crates/wu/Cargo.toml)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           if [[ -n $REQUESTED_WU && $REQUESTED_WU != "$tag" ]]; then
             printf '此提交固定在 Wu %s，请先在集成分支合入目标版本。\n' "$tag" >&2
             exit 1
           fi
+          needed=true
           if [[ $GITHUB_EVENT_NAME == schedule ]]; then
             latest=$(scripts/upstream-release.sh | jq -er .tag)
             if [[ $latest != "$tag" ]]; then
-              printf '上游已发布 %s，当前提交仍固定在 %s。请先合入并验收。\n' "$latest" "$tag" >> "$GITHUB_STEP_SUMMARY"
+              printf '上游已发布 %s，当前提交仍固定在 %s。\n' "$latest" "$tag" >> "$GITHUB_STEP_SUMMARY"
             fi
-          fi
-          mode=local
-          if [[ $SIGNED == 1 ]]; then mode=signed; fi
-          release_repository=${RELEASE_REPOSITORY:-"$GITHUB_REPOSITORY"}
-          [[ $release_repository =~ ^[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+$ ]]
-          feed_key=$(printf '%s' "$release_repository" | sha256sum | cut -c1-10)
-          name="wu-plus-$tag-${revision:0:12}-${GITHUB_SHA:0:12}-$feed_key-$mode"
-          needed=true
-          if [[ $GITHUB_EVENT_NAME == schedule ]]; then
-            artifacts=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$name")
+            artifacts=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="wu-plus-candidate-$GITHUB_SHA")
             if jq -e 'any(.artifacts[]; .expired == false)' <<<"$artifacts" >/dev/null; then
               needed=false
             fi
           fi
-          printf 'name=%s\nneeded=%s\n' "$name" "$needed" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\nneeded=%s\n' "$version" "$needed" >> "$GITHUB_OUTPUT"
 
-  build:
+  bundle-macos:
     needs: discover
     if: needs.discover.outputs.needed == 'true'
     runs-on: macos-15
-    timeout-minutes: 165
-    env:
-      WU_PLUS_INSTALL_RUST: '1'
-      WU_PLUS_BUILD_JOBS: '3'
-      CARGO_PROFILE_RELEASE_FAST_DEBUG: '0'
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          fetch-depth: 0
-      - name: Install build dependencies
-        run: |
-          test "$(uname -m)" = arm64
-          brew install lld cmake pkgconf subversion
-      - name: Build immutable candidate
+      - name: Install dependencies
+        run: brew install lld cmake pkgconf subversion
+      - name: Test Subversion backend
+        if: matrix.arch == 'aarch64'
+        run: cargo test --locked --manifest-path plugin/Cargo.toml
+      - name: Prepare provisioning profile
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_REPOSITORY: ${{ vars.WU_PLUS_RELEASE_REPOSITORY }}
-          WU_PLUS_SIGN_CANDIDATES: ${{ vars.WU_PLUS_SIGN_CANDIDATES }}
-          WU_PLUS_CODESIGN_IDENTITY: ${{ vars.WU_PLUS_CODESIGN_IDENTITY }}
-          WU_PLUS_SPARKLE_PUBLIC_KEY: ${{ vars.WU_PLUS_SPARKLE_PUBLIC_KEY }}
-          WU_PLUS_SPARKLE_PRIVATE_KEY: ${{ secrets.WU_PLUS_SPARKLE_PRIVATE_KEY }}
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          MACOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
         run: |
-          cp scripts/wu-upstream.json "$RUNNER_TEMP/upstream.json"
-          mkdir -p "$RUNNER_TEMP/candidate"
-          release_repository=${RELEASE_REPOSITORY:-"$GITHUB_REPOSITORY"}
-          scripts/build-candidate.sh "$RUNNER_TEMP/candidate" \
-            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" "$GITHUB_SERVER_URL/$release_repository" \
-            2>&1 | tee "$RUNNER_TEMP/build.log"
-          {
-            echo '### Wu Plus candidate'
-            jq -r '"Wu: " + .upstream.tag, "Build: " + .build, "SHA-256: " + .archive_sha256, "Notarized: " + (.notarized | tostring)' "$RUNNER_TEMP/candidate/candidate.json"
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n $MACOS_PROVISIONING_PROFILE_BASE64 ]]; then
+            profile_path="$RUNNER_TEMP/embedded.provisionprofile"
+            printf '%s' "$MACOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$profile_path"
+            printf 'MACOS_PROVISIONING_PROFILE=%s\n' "$profile_path" >> "$GITHUB_ENV"
+          fi
+      - name: Bundle and sign as upstream Wu
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
+        run: script/bundle-mac "$TARGET_ARCH-apple-darwin"
+      - name: Stage macOS release files
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir "$RUNNER_TEMP/bundle"
+          CARGO_BUILD_TARGET="$TARGET_ARCH-apple-darwin" scripts/package-plugin.sh "$RUNNER_TEMP/subversion"
+          mv "$RUNNER_TEMP/subversion/Subversion.zip" "$RUNNER_TEMP/bundle/Subversion-macos-$TARGET_ARCH.zip"
+          cp "target/$TARGET_ARCH-apple-darwin/release/Wu-Plus-$TARGET_ARCH.dmg" \
+            "target/wu-remote-server-macos-$TARGET_ARCH.gz" "$RUNNER_TEMP/bundle/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ needs.discover.outputs.name }}
-          path: |
-            ${{ runner.temp }}/candidate/Wu-Plus-arm64.zip
-            ${{ runner.temp }}/candidate/Subversion.zip
-            ${{ runner.temp }}/candidate/appcast.xml
-            ${{ runner.temp }}/candidate/candidate.json
+          name: wu-plus-bundle-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bundle/*
           if-no-files-found: error
           overwrite: true
           compression-level: 0
           retention-days: 30
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
+
+  bundle-linux:
+    needs: discover
+    if: needs.discover.outputs.needed == 'true'
+    timeout-minutes: 300
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          name: wu-plus-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          persist-credentials: false
+      - name: Install dependencies
+        run: script/linux
+      - name: Bundle as upstream Wu
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          script/bundle-linux
+          mkdir "$RUNNER_TEMP/bundle"
+          cp "target/release/wu-plus-linux-$TARGET_ARCH.tar.gz" \
+            "target/wu-remote-server-linux-$TARGET_ARCH.gz" "$RUNNER_TEMP/bundle/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-bundle-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bundle/*
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+
+  bundle-windows:
+    needs: discover
+    if: needs.discover.outputs.needed == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Bundle as upstream Wu
+        run: script/bundle-windows.ps1 -Architecture x86_64
+        shell: pwsh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-bundle-windows-x86_64
           path: |
-            ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/upstream.json
-            ${{ runner.temp }}/candidate/notary*.json
+            target/Wu-Plus-x86_64.exe
+            target/wu-remote-server-windows-x86_64.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+
+  manifest:
+    needs: [discover, bundle-macos, bundle-linux, bundle-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: wu-plus-bundle-*
+          path: bundles
+          merge-multiple: true
+      - name: Record candidate assets and checksums
+        env:
+          VERSION: ${{ needs.discover.outputs.version }}
+        run: |
+          cd bundles
+          printf '%s\n' "$VERSION" > version.txt
+          sha256sum version.txt \
+            Wu-Plus-{aarch64,x86_64}.dmg Wu-Plus-x86_64.exe \
+            wu-plus-linux-{aarch64,x86_64}.tar.gz \
+            wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz \
+            Subversion-macos-{aarch64,x86_64}.zip > "$RUNNER_TEMP/SHA256SUMS"
+          cp version.txt "$RUNNER_TEMP/version.txt"
+          {
+            printf '### Wu Plus %s\n\n' "$VERSION"
+            printf '确认各平台候选安装包后，用以下 SHA-256 运行发布工作流。\n\n'
+            sha256sum "$RUNNER_TEMP/SHA256SUMS" | cut -d ' ' -f 1
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/SHA256SUMS
+            ${{ runner.temp }}/version.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30

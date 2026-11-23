@@ -104,7 +104,7 @@ impl Client {
         }
         let mut child = new_command(executable)
             // A development extension may live in a macOS-protected folder.
-            // Sparkle relaunches the IDE without any transient folder access.
+            // Relaunching the IDE does not carry transient folder access.
             .current_dir(paths::data_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

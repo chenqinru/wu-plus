@@ -27,6 +27,9 @@ fi
 export CARGO_NET_GIT_FETCH_WITH_CLI=${CARGO_NET_GIT_FETCH_WITH_CLI:-true}
 export CARGO_TARGET_DIR="$target"
 export CARGO_INCREMENTAL=0
+if [[ $mode == bundle ]]; then
+  export ZED_RELEASE_CHANNEL=stable
+fi
 cd "$project"
 cargo "+$toolchain" --version >/dev/null
 common=(--locked --profile release-fast --jobs "${WU_PLUS_BUILD_JOBS:-6}" --package wu --package cli --features gpui_platform/runtime_shaders)

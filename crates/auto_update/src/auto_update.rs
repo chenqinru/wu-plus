@@ -56,12 +56,14 @@ struct UpdateLock {
 }
 
 impl UpdateLock {
+    #[cfg(test)]
     fn path() -> PathBuf {
-        #[cfg(test)]
-        let file_name = format!("wu-auto-update-{}.lock", std::process::id());
-        #[cfg(not(test))]
-        let file_name = "wu-auto-update.lock".to_string();
-        paths::temp_dir().join(file_name)
+        std::env::temp_dir().join(format!("wu-plus-auto-update-{}.lock", std::process::id()))
+    }
+
+    #[cfg(not(test))]
+    fn path() -> PathBuf {
+        paths::temp_dir().join("wu-plus-auto-update.lock")
     }
 
     fn try_acquire() -> Result<Self> {
@@ -231,7 +233,8 @@ pub struct ReleaseAsset {
     pub digest: Option<String>,
 }
 
-const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/dstrml/wu/releases";
+const WU_PLUS_RELEASES_API_URL: &str = "https://api.github.com/repos/chenqinru/wu-plus/releases";
+const WU_PLUS_TAG_PREFIX: &str = "wu-plus-v";
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -249,9 +252,9 @@ struct GitHubReleaseAsset {
 
 fn github_asset_name(asset: &str, os: &str, arch: &str) -> Result<String> {
     match (asset, os) {
-        ("zed", "macos") => Ok(format!("Wu-{arch}.dmg")),
-        ("zed", "linux") => Ok(format!("wu-linux-{arch}.tar.gz")),
-        ("zed", "windows") => Ok(format!("Wu-{arch}.exe")),
+        ("zed", "macos") => Ok(format!("Wu-Plus-{arch}.dmg")),
+        ("zed", "linux") => Ok(format!("wu-plus-linux-{arch}.tar.gz")),
+        ("zed", "windows") => Ok(format!("Wu-Plus-{arch}.exe")),
         ("wu-remote-server", _) => Ok(format!("wu-remote-server-{os}-{arch}.gz")),
         _ => anyhow::bail!("no release asset for {asset} on {os}"),
     }
@@ -413,9 +416,11 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
             let mut current_version = auto_updater.current_version.clone();
             current_version.pre = semver::Prerelease::EMPTY;
             current_version.build = semver::BuildMetadata::EMPTY;
-            format!("https://github.com/dstrml/wu/releases/tag/v{current_version}")
+            format!(
+                "https://github.com/chenqinru/wu-plus/releases/tag/{WU_PLUS_TAG_PREFIX}{current_version}"
+            )
         }
-        ReleaseChannel::Dev => "https://github.com/dstrml/wu/commits/main/".to_string(),
+        ReleaseChannel::Dev => "https://github.com/chenqinru/wu-plus/commits/main/".to_string(),
     };
     Some(url)
 }
@@ -427,7 +432,7 @@ pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-const INSTALLER_DIR_PREFIX: &str = "wu-auto-update";
+const INSTALLER_DIR_PREFIX: &str = "wu-plus-auto-update";
 
 #[cfg(not(target_os = "windows"))]
 struct InstallerDir(tempfile::TempDir);
@@ -737,13 +742,14 @@ impl AutoUpdater {
         let client = this.read_with(cx, |this, _| this.client.clone());
         let http_client = client.http_client();
 
+        let asset_name = github_asset_name(asset, os, arch)?;
         let url = match version {
             Some(mut version) => {
                 version.pre = semver::Prerelease::EMPTY;
                 version.build = semver::BuildMetadata::EMPTY;
-                format!("{GITHUB_RELEASES_API_URL}/tags/v{version}")
+                format!("{WU_PLUS_RELEASES_API_URL}/tags/{WU_PLUS_TAG_PREFIX}{version}")
             }
-            None => format!("{GITHUB_RELEASES_API_URL}/latest"),
+            None => format!("{WU_PLUS_RELEASES_API_URL}/latest"),
         };
 
         let mut response = http_client
@@ -766,7 +772,6 @@ impl AutoUpdater {
                 )
             })?;
 
-        let asset_name = github_asset_name(asset, os, arch)?;
         let asset = release
             .assets
             .into_iter()
@@ -781,8 +786,8 @@ impl AutoUpdater {
         Ok(ReleaseAsset {
             version: release
                 .tag_name
-                .strip_prefix('v')
-                .unwrap_or(&release.tag_name)
+                .strip_prefix(WU_PLUS_TAG_PREFIX)
+                .with_context(|| format!("unexpected release tag {}", release.tag_name))?
                 .to_string(),
             url: asset.browser_download_url,
             digest: asset.digest.map(|digest| {
@@ -959,9 +964,9 @@ impl AutoUpdater {
 
     async fn target_path(installer_dir: &InstallerDir) -> Result<PathBuf> {
         let filename = match OS {
-            "macos" => anyhow::Ok("Wu.dmg"),
-            "linux" => Ok("wu.tar.gz"),
-            "windows" => Ok("Wu.exe"),
+            "macos" => anyhow::Ok("Wu-Plus.dmg"),
+            "linux" => Ok("wu-plus.tar.gz"),
+            "windows" => Ok("Wu-Plus.exe"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -1242,7 +1247,7 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("wu{}.app", suffix);
+    let app_folder_name = format!("wu-plus{suffix}.app");
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
@@ -1280,12 +1285,8 @@ async fn install_release_macos(
     running_app_path: PathBuf,
     background_executor: &BackgroundExecutor,
 ) -> Result<Option<PathBuf>> {
-    let running_app_filename = running_app_path
-        .file_name()
-        .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
-
-    let mount_path = temp_dir.path().join("Wu");
-    let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
+    let mount_path = temp_dir.path().join(paths::APP_NAME);
+    let mut mounted_app_path: OsString = mount_path.join(format!("{}.app", paths::APP_NAME)).into();
 
     mounted_app_path.push("/");
     let mut cmd = new_command("hdiutil");
@@ -1455,7 +1456,6 @@ pub async fn finalize_auto_update_on_quit() {
 #[cfg(test)]
 mod tests {
     use client::Client;
-    use futures::channel::oneshot;
     use gpui::TestAppContext;
     use http_client::{FakeHttpClient, Response};
     use settings::default_settings;
@@ -1496,112 +1496,77 @@ mod tests {
     #[gpui::test]
     async fn test_auto_update_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
-        zlog::init_test();
+        let installed_version = Version::new(0, 100, 0);
+        let update_version = Version::new(0, 100, 1);
         let release_available = Arc::new(AtomicBool::new(false));
+        let payload = "<fake-wu-plus-update>";
+        let temporary = tempdir().unwrap();
+        let destination = temporary.path().join("wu-plus");
 
-        let (dmg_tx, dmg_rx) = oneshot::channel::<String>();
-
-        cx.update(|cx| {
+        let auto_updater = cx.update(|cx| {
             settings::init(cx);
-
-            let current_version = semver::Version::new(0, 100, 0);
-            release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
-
-            let release_available = Arc::clone(&release_available);
-            let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
-            let fake_client_http = FakeHttpClient::create(move |req| {
-                let release_available = release_available.load(atomic::Ordering::Relaxed);
-                let dmg_rx = dmg_rx.clone();
+            cx.set_global(db::AppDatabase::test_new());
+            release_channel::init_test(installed_version.clone(), ReleaseChannel::Stable, cx);
+            let destination = destination.clone();
+            cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
+                std::fs::copy(target_path, &destination)?;
+                Ok(Some(destination.clone()))
+            })));
+            let release_available = release_available.clone();
+            let client = Client::new(FakeHttpClient::create(move |request| {
+                let available = release_available.load(atomic::Ordering::Relaxed);
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
-                    } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
-                } else if req.uri().path() == "/new-download" {
-                    return Ok(Response::builder().status(200).body({
-                        let dmg_rx = dmg_rx.lock().take().unwrap();
-                        dmg_rx.await.unwrap().into()
-                    }).unwrap());
+                    let body = match request.uri().path() {
+                        "/repos/chenqinru/wu-plus/releases/latest" => {
+                            let tag = if available {
+                                "wu-plus-v0.100.1"
+                            } else {
+                                "wu-plus-v0.100.0"
+                            };
+                            serde_json::json!({
+                                "tag_name": tag,
+                                "assets": [{
+                                    "name": github_asset_name("zed", OS, ARCH)?,
+                                    "browser_download_url": "https://test.example/new-download",
+                                    "digest": format!("sha256:{:x}", Sha256::digest(payload.as_bytes())),
+                                }],
+                            })
+                            .to_string()
+                        }
+                        "/new-download" => payload.to_owned(),
+                        _ => return Ok(Response::builder().status(404).body("".into())?),
+                    };
+                    Ok(Response::builder().status(200).body(body.into())?)
                 }
-                Ok(Response::builder().status(404).body("".into()).unwrap())
-                }
-            });
-            let client = Client::new(fake_client_http);
-            crate::init(client, cx);
+            }));
+            cx.new(|cx| AutoUpdater::new(installed_version.clone(), client, cx))
         });
 
-        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
-
-        cx.background_executor.run_until_parked();
-
+        AutoUpdater::update(auto_updater.clone(), &mut cx.to_async())
+            .await
+            .unwrap();
         auto_updater.read_with(cx, |updater, _| {
             assert_eq!(updater.status(), AutoUpdateStatus::Idle);
-            assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
+            assert_eq!(updater.current_version(), installed_version);
         });
+        assert!(!destination.exists());
 
-        release_available.store(true, atomic::Ordering::SeqCst);
-        cx.background_executor.advance_clock(POLL_INTERVAL);
-        cx.background_executor.run_until_parked();
-
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Idle) {
-                break;
-            }
-        }
-        let status = auto_updater.read_with(cx, |updater, _| updater.status());
+        release_available.store(true, atomic::Ordering::Relaxed);
+        AutoUpdater::update(auto_updater.clone(), &mut cx.to_async())
+            .await
+            .unwrap();
         assert_eq!(
-            status,
-            AutoUpdateStatus::Downloading {
-                version: semver::Version::new(0, 100, 1),
-                progress: None,
-            }
-        );
-
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
-
-        let tmp_dir = Arc::new(tempdir().unwrap());
-
-        cx.update(|cx| {
-            let tmp_dir = tmp_dir.clone();
-            cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
-                let tmp_dir = tmp_dir.clone();
-                let dest_path = tmp_dir.path().join("zed");
-                std::fs::copy(&target_path, &dest_path)?;
-                Ok(Some(dest_path))
-            })));
-        });
-
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Downloading { .. }) {
-                break;
-            }
-        }
-        let status = auto_updater.read_with(cx, |updater, _| updater.status());
-        assert_eq!(
-            status,
+            auto_updater.read_with(cx, |updater, _| updater.status()),
             AutoUpdateStatus::Updated {
-                version: semver::Version::new(0, 100, 1)
+                version: update_version
             }
         );
         let will_restart = cx.expect_restart();
         cx.update(|cx| cx.restart()).expect("restart was rejected");
         let (path, arguments) = will_restart.await.unwrap();
         assert!(arguments.is_empty());
-        let path = path.unwrap();
-        assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        assert_eq!(path.as_ref(), Some(&destination));
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), payload);
     }
 
     #[gpui::test]

@@ -59,7 +59,7 @@ $workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $env:ZED_WORKSPACE = $workspace
 
 Push-Location -Path "$workspace\crates\wu"
-$channel = Get-Content "RELEASE_CHANNEL"
+$channel = if ($env:ZED_RELEASE_CHANNEL) { $env:ZED_RELEASE_CHANNEL } else { Get-Content "RELEASE_CHANNEL" }
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
@@ -128,7 +128,12 @@ function BuildRemoteServer {
 
 function MakeAppx {
     $manifestFile = "$workspace\crates\explorer_command_injector\AppxManifest.xml"
-    Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
+    $manifest = Get-Content -Raw $manifestFile
+    if ($channel -eq "dev") {
+        $manifest = $manifest.Replace('Chenqinru.WuPlus', 'Chenqinru.WuPlus.Dev').Replace(
+            '68a3714a-322a-4a70-8b1a-b3fbe7bfdd37', 'b9f0a052-0bf1-43f4-980e-ef0743d3434a')
+    }
+    Set-Content -Path "$innoDir\make_appx\AppxManifest.xml" -Value $manifest -Encoding utf8
     $makeAppx = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\makeappx.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
     if (-not $makeAppx) {
         throw "makeappx.exe not found; install the Windows 10/11 SDK"
@@ -155,8 +160,8 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\wu.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\wu" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\wu-plus.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\wu-plus" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -177,35 +182,32 @@ function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
     switch ($channel) {
         "stable" {
-            $appId = "{{9BDBDF5C-B3B7-4F80-B831-98CFF7361C8A}"
-            # Wu used Zed's AppId before it got its own, so installs from then are registered under it.
-            $oldAppId = "2DB0DA96-CA55-49BB-AF4F-64AF36A86712"
+            $appId = "{{1DCFCB93-8D27-4132-83F4-678BEDDA3DC6}"
             $appIconName = "app-icon"
-            $appName = "Wu"
-            $appDisplayName = "Wu"
-            $appSetupName = "Wu-$Architecture"
+            $appName = "Wu Plus"
+            $appDisplayName = "Wu Plus"
+            $appSetupName = "Wu-Plus-$Architecture"
             # Must match `app_identifier()` in crates/release_channel/src/lib.rs plus the "-Instance-Mutex" suffix
             # used by crates/wu/src/wu/windows_only_instance.rs.
-            $appMutex = "Wu-Editor-Stable-Instance-Mutex"
+            $appMutex = "Wu-Plus-Editor-Stable-Instance-Mutex"
             $appExeName = "Wu"
-            $regValueName = "Wu"
-            $appUserId = "Farshed.Wu"
-            $appShellNameShort = "W&u"
-            $appAppxFullName = "Farshed.Wu_1.0.0.0_neutral__japxn1gcva8rg"
+            $regValueName = "WuPlus"
+            $appUserId = "Chenqinru.WuPlus"
+            $appShellNameShort = "W&u Plus"
+            $appAppxFullName = "Chenqinru.WuPlus_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "dev" {
-            $appId = "{{3EF9FC05-FE00-4BD0-941C-21F3BA4E6952}"
-            $oldAppId = "8357632E-24A4-4F32-BA97-E575B4D1FE5D"
+            $appId = "{{925F3B18-9BBD-40D3-A290-445A82B499A4}"
             $appIconName = "app-icon-dev"
-            $appName = "Wu Dev"
-            $appDisplayName = "Wu Dev"
-            $appSetupName = "Wu-$Architecture"
-            $appMutex = "Wu-Editor-Dev-Instance-Mutex"
+            $appName = "Wu Plus Dev"
+            $appDisplayName = "Wu Plus Dev"
+            $appSetupName = "Wu-Plus-$Architecture"
+            $appMutex = "Wu-Plus-Editor-Dev-Instance-Mutex"
             $appExeName = "Wu"
-            $regValueName = "WuDev"
-            $appUserId = "Farshed.Wu.Dev"
-            $appShellNameShort = "W&u Dev"
-            $appAppxFullName = "Farshed.Wu_1.0.0.0_neutral__japxn1gcva8rg"
+            $regValueName = "WuPlusDev"
+            $appUserId = "Chenqinru.WuPlus.Dev"
+            $appShellNameShort = "W&u Plus Dev"
+            $appAppxFullName = "Chenqinru.WuPlus.Dev_1.0.0.0_neutral__japxn1gcva8rg"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -218,7 +220,6 @@ function BuildInstaller {
 
     $definitions = @{
         "AppId"          = $appId
-        "OldAppId"       = $oldAppId
         "AppIconName"    = $appIconName
         "OutputDir"      = "$workspace\target"
         "AppSetupName"   = $appSetupName
@@ -274,7 +275,7 @@ if ($buildSuccess) {
     Write-Output "Build successful"
     if ($Install) {
         Write-Output "Installing Wu..."
-        Start-Process -FilePath "$workspace/target/Wu-$Architecture.exe"
+        Start-Process -FilePath "$workspace/target/Wu-Plus-$Architecture.exe"
     }
     exit 0
 }

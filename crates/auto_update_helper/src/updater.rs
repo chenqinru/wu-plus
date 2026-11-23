@@ -174,8 +174,8 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         Job::mkdir(p("old")),
         Job::move_file(p("Wu.exe"), p("old\\Wu.exe")),
         Job::mkdir(p("old\\bin")),
-        Job::move_file(p("bin\\Wu.exe"), p("old\\bin\\Wu.exe")),
-        Job::move_file(p("bin\\wu"), p("old\\bin\\wu")),
+        Job::move_file(p("bin\\wu-plus.exe"), p("old\\bin\\wu-plus.exe")),
+        Job::move_file(p("bin\\wu-plus"), p("old\\bin\\wu-plus")),
         //
         // TODO: remove after a few weeks once everyone is on the new version and this file never exists
         Job::move_if_exists(p("OpenConsole.exe"), p("old\\OpenConsole.exe")),
@@ -190,8 +190,8 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
         // Copy new files
         Job::move_file(p("install\\Wu.exe"), p("Wu.exe")),
-        Job::move_file(p("install\\bin\\Wu.exe"), p("bin\\Wu.exe")),
-        Job::move_file(p("install\\bin\\wu"), p("bin\\wu")),
+        Job::move_file(p("install\\bin\\wu-plus.exe"), p("bin\\wu-plus.exe")),
+        Job::move_file(p("install\\bin\\wu-plus"), p("bin\\wu-plus")),
         //
         Job::mkdir_if_exists(p("x64"), p("install\\x64")),
         Job::mkdir_if_exists(p("arm64"), p("install\\arm64")),
@@ -280,7 +280,7 @@ fn release_file_handles(app_dir: &Path) -> Result<()> {
     // Files that commonly get locked by Explorer or other processes
     let files_to_release = [
         app_dir.join("Wu.exe"),
-        app_dir.join("bin\\Wu.exe"),
+        app_dir.join("bin\\wu-plus.exe"),
         app_dir.join("bin\\wu"),
         app_dir.join("conpty.dll"),
     ];

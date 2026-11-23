@@ -7,10 +7,14 @@ mkdir -p "$artifact_dir"
 stage=$(mktemp -d "$artifact_dir/.plugin.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
-CARGO_TARGET_DIR="$project/.build/plugin-target" cargo +1.97.1 build   --locked --release --manifest-path "$project/plugin/Cargo.toml"
+target_dir="$project/.build/plugin-target"
+CARGO_TARGET_DIR="$target_dir" cargo +1.97.1 build --locked --release --manifest-path "$project/plugin/Cargo.toml"
+if [[ -n ${CARGO_BUILD_TARGET:-} ]]; then
+  target_dir="$target_dir/$CARGO_BUILD_TARGET"
+fi
 mkdir -p "$stage/Subversion/bin"
 install -m 644 "$project/plugin/extension.toml" "$stage/Subversion/extension.toml"
-install -m 755 "$project/.build/plugin-target/release/wu-plus-subversion-provider" "$stage/Subversion/bin/wu-plus-subversion-provider"
+install -m 755 "$target_dir/release/wu-plus-subversion-provider" "$stage/Subversion/bin/wu-plus-subversion-provider"
 codesign --force --sign - "$stage/Subversion/bin/wu-plus-subversion-provider"
 codesign --verify --strict "$stage/Subversion/bin/wu-plus-subversion-provider"
 ditto -c -k --keepParent "$stage/Subversion" "$stage/Subversion.zip"

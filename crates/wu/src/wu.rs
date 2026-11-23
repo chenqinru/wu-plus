@@ -8,8 +8,6 @@ mod open_url_modal;
 mod quick_action_bar;
 #[cfg(target_os = "macos")]
 mod svn_panel;
-#[cfg(target_os = "macos")]
-pub mod sparkle_update;
 pub mod remote_debug;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;

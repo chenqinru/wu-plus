@@ -281,7 +281,9 @@ fn main() {
     }
 
     #[cfg(target_os = "macos")]
-    let product_data_dir = paths::home_dir().join(wu::sparkle_update::data_directory());
+    let product_data_dir = paths::home_dir()
+        .join("Library/Application Support")
+        .join(paths::APP_NAME);
     #[cfg(target_os = "macos")]
     let default_data = Some(product_data_dir.to_string_lossy());
     #[cfg(not(target_os = "macos"))]
@@ -614,9 +616,6 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
-        #[cfg(target_os = "macos")]
-        wu::sparkle_update::init(cx);
-        #[cfg(not(target_os = "macos"))]
         auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
         auto_update_ui::init(cx);

@@ -2,10 +2,10 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
-AppPublisher=Farshed
-AppPublisherURL=https://github.com/dstrml/wu
-AppSupportURL=https://github.com/dstrml/wu/issues
-AppUpdatesURL=https://github.com/dstrml/wu/releases
+AppPublisher=Wu Plus contributors
+AppPublisherURL=https://github.com/chenqinru/wu-plus
+AppSupportURL=https://github.com/chenqinru/wu-plus/issues
+AppUpdatesURL=https://github.com/chenqinru/wu-plus/releases
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -1257,10 +1257,10 @@ Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}\command"; Valu
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:AddToPath|{app}\bin}"; Tasks: addtopath; Check: NeedsAddToPath(ExpandConstant('{app}\bin'))
 
 ; URI Scheme
-Root: HKCU; Subkey: "Software\Classes\wu"; ValueType: "string"; ValueData: "URL:wu Protocol"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\wu"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\wu\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Wu.exe,1"
-Root: HKCU; Subkey: "Software\Classes\wu\shell\open\command"; ValueType: "string"; ValueData: """{app}\Wu.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\wu-plus"; ValueType: "string"; ValueData: "URL:wu-plus Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\wu-plus"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\wu-plus\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Wu.exe,1"
+Root: HKCU; Subkey: "Software\Classes\wu-plus\shell\open\command"; ValueType: "string"; ValueData: """{app}\Wu.exe"" ""%1"""
 
 [Code]
 function WizardNotSilent(): Boolean;
@@ -1408,27 +1408,6 @@ begin
   Result := SwitchHasValue('update', 'true') and WizardSilent();
 end;
 
-procedure RemoveOldUninstallEntry();
-var
-  Key, Publisher, OldUninstaller: String;
-begin
-  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + '{' + '{#OldAppId}' + '}_is1';
-  // The old AppId is also Zed's, so only remove entries that Wu wrote.
-  if not RegQueryStringValue(HKCU, Key, 'Publisher', Publisher) or (Publisher <> 'Farshed') then
-    exit;
-  if RegQueryStringValue(HKCU, Key, 'UninstallString', OldUninstaller) then
-  begin
-    OldUninstaller := RemoveQuotes(OldUninstaller);
-    if (CompareText(ExtractFileDir(OldUninstaller), ExpandConstant('{app}')) = 0)
-      and (CompareText(OldUninstaller, ExpandConstant('{uninstallexe}')) <> 0) then
-    begin
-      DeleteFile(OldUninstaller);
-      DeleteFile(ChangeFileExt(OldUninstaller, '.dat'));
-    end;
-  end;
-  RegDeleteKeyIncludingSubkeys(HKCU, Key);
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
@@ -1440,7 +1419,6 @@ begin
   end;
   if CurStep = ssPostInstall then
   begin
-    RemoveOldUninstallEntry();
     if IsUpdating() then
     begin
       SaveStringToFile(ExpandConstant('{app}\updates\versions.txt'), '{#Version}' + #13#10, True);

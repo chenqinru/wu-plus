@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-# Downloads a Wu release from GitHub and unpacks it into ~/.local/.
+# Downloads a Wu Plus release from GitHub and unpacks it into ~/.local/.
 # Optional: WU_VERSION=1.2.3 picks a release, WU_BUNDLE_PATH installs a local tarball.
 # The ZED_ names of these variables still work for older instructions.
 
@@ -9,13 +9,13 @@ main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${WU_CHANNEL:-${ZED_CHANNEL:-stable}}"
-    repo="dstrml/wu"
+    repo="chenqinru/wu-plus"
     version="${WU_VERSION:-${ZED_VERSION:-latest}}"
     bundle_path="${WU_BUNDLE_PATH:-${ZED_BUNDLE_PATH:-}}"
     if [ "$version" = "latest" ]; then
         download_base="https://github.com/$repo/releases/latest/download"
     else
-        download_base="https://github.com/$repo/releases/download/v$version"
+        download_base="https://github.com/$repo/releases/download/wu-plus-v$version"
     fi
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
@@ -61,10 +61,10 @@ main() {
 
     "$platform" "$@"
 
-    if [ "$(command -v wu)" = "$HOME/.local/bin/wu" ]; then
-        echo "Wu has been installed. Run with 'wu'"
+    if [ "$(command -v wu-plus)" = "$HOME/.local/bin/wu-plus" ]; then
+        echo "Wu Plus has been installed. Run with 'wu-plus'"
     else
-        echo "To run Wu from your terminal, you must add ~/.local/bin to your PATH"
+        echo "To run Wu Plus from your terminal, you must add ~/.local/bin to your PATH"
         echo "Run:"
 
         case "$SHELL" in
@@ -81,16 +81,16 @@ main() {
                 ;;
         esac
 
-        echo "To run Wu now, '~/.local/bin/wu'"
+        echo "To run Wu Plus now, '~/.local/bin/wu-plus'"
     fi
 }
 
 linux() {
     if [ -n "$bundle_path" ]; then
-        cp "$bundle_path" "$temp/wu-linux-$arch.tar.gz"
+        cp "$bundle_path" "$temp/wu-plus-linux-$arch.tar.gz"
     else
-        echo "Downloading Wu version: $version"
-        curl "$download_base/wu-linux-$arch.tar.gz" > "$temp/wu-linux-$arch.tar.gz"
+        echo "Downloading Wu Plus version: $version"
+        curl "$download_base/wu-plus-linux-$arch.tar.gz" > "$temp/wu-plus-linux-$arch.tar.gz"
     fi
 
     suffix=""
@@ -101,29 +101,29 @@ linux() {
     appid=""
     case "$channel" in
       stable)
-        appid="me.farshed.Wu"
+        appid="io.github.chenqinru.wu-plus"
         ;;
       dev)
-        appid="me.farshed.Wu-Dev"
+        appid="io.github.chenqinru.wu-plus-dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="me.farshed.Wu"
+        appid="io.github.chenqinru.wu-plus"
         ;;
     esac
 
     # Unpack
-    rm -rf "$HOME/.local/wu$suffix.app"
-    mkdir -p "$HOME/.local/wu$suffix.app"
-    tar -xzf "$temp/wu-linux-$arch.tar.gz" -C "$HOME/.local/"
+    rm -rf "$HOME/.local/wu-plus$suffix.app"
+    mkdir -p "$HOME/.local/wu-plus$suffix.app"
+    tar -xzf "$temp/wu-plus-linux-$arch.tar.gz" -C "$HOME/.local/"
 
-    wu_editor="$HOME/.local/wu$suffix.app/libexec/wu-editor"
+    wu_editor="$HOME/.local/wu-plus$suffix.app/libexec/wu-editor"
     if [ -f "$wu_editor" ] && command -v ldd >/dev/null 2>&1; then
         missing="$(ldd "$wu_editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
         if [ -n "$missing" ]; then
-            echo "Warning: your system is missing libraries that Wu needs:"
+            echo "Warning: your system is missing libraries that Wu Plus needs:"
             echo "$missing" | sed 's/^/    /'
-            echo "Install them with your package manager, or Wu will fail to start."
+            echo "Install them with your package manager, or Wu Plus will fail to start."
         fi
     fi
 
@@ -131,21 +131,22 @@ linux() {
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
     # Link the binary
-    ln -sf "$HOME/.local/wu$suffix.app/bin/wu" "$HOME/.local/bin/wu"
+    ln -sf "$HOME/.local/wu-plus$suffix.app/bin/wu-plus" "$HOME/.local/bin/wu-plus"
 
     # Copy .desktop file
     desktop_file_path="$HOME/.local/share/applications/${appid}.desktop"
-    src_dir="$HOME/.local/wu$suffix.app/share/applications"
+    src_dir="$HOME/.local/wu-plus$suffix.app/share/applications"
     cp "$src_dir/${appid}.desktop" "${desktop_file_path}"
-    sed -i "s|Icon=wu|Icon=$HOME/.local/wu$suffix.app/share/icons/hicolor/512x512/apps/wu.png|g" "${desktop_file_path}"
-    sed -i "s|Exec=wu|Exec=$HOME/.local/wu$suffix.app/bin/wu|g" "${desktop_file_path}"
+    sed -i "s|Icon=wu-plus|Icon=$HOME/.local/wu-plus$suffix.app/share/icons/hicolor/512x512/apps/wu-plus.png|g" "${desktop_file_path}"
+    sed -i "s|Exec=wu-plus|Exec=$HOME/.local/wu-plus$suffix.app/bin/wu-plus|g" "${desktop_file_path}"
 }
 
 macos() {
-    echo "Downloading Wu version: $version"
-    curl "$download_base/Wu-$arch.dmg" > "$temp/Wu-$arch.dmg"
-    hdiutil attach -quiet "$temp/Wu-$arch.dmg" -mountpoint "$temp/mount"
-    app="$(cd "$temp/mount/"; echo *.app)"
+    echo "Downloading Wu Plus version: $version"
+    curl "$download_base/Wu-Plus-$arch.dmg" > "$temp/Wu-Plus-$arch.dmg"
+    hdiutil attach -quiet "$temp/Wu-Plus-$arch.dmg" -mountpoint "$temp/mount"
+    app="Wu Plus.app"
+    test -d "$temp/mount/$app"
     echo "Installing $app"
     if [ -d "/Applications/$app" ]; then
         echo "Removing existing $app"
@@ -156,7 +157,7 @@ macos() {
 
     mkdir -p "$HOME/.local/bin"
     # Link the binary
-    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/wu"
+    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/wu-plus"
 }
 
 main "$@"

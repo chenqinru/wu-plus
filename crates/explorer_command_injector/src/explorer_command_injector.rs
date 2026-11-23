@@ -44,7 +44,7 @@ struct ExplorerCommandInjector;
 impl IExplorerCommand_Impl for ExplorerCommandInjector_Impl {
     fn GetTitle(&self, _: Ref<IShellItemArray>) -> Result<windows_core::PWSTR> {
         let command_description =
-            retrieve_command_description().unwrap_or(HSTRING::from("Open with Wu"));
+            retrieve_command_description().unwrap_or(HSTRING::from("Open with Wu Plus"));
         unsafe { SHStrDupW(&command_description) }
     }
 
@@ -128,8 +128,8 @@ impl IClassFactory_Impl for ExplorerCommandInjectorFactory_Impl {
 }
 
 const MODULE_ID: GUID = cfg_select! {
-    feature = "stable" => { GUID::from_u128(0x1e6daf2f_4a3b_4d29_9ea7_ed82888c16a2) },
-    _ => { GUID::from_u128(0x13e28046_5ef0_4561_91a0_4a0e6296e211) },
+    feature = "stable" => { GUID::from_u128(0x68a3714a_322a_4a70_8b1a_b3fbe7bfdd37) },
+    _ => { GUID::from_u128(0xb9f0a052_0bf1_43f4_980e_ef0743d3434a) },
 };
 
 #[unsafe(no_mangle)]
@@ -178,8 +178,8 @@ fn get_zed_exe_path() -> Option<String> {
 #[inline]
 fn retrieve_command_description() -> Result<HSTRING> {
     const REG_PATH: &str = cfg_select! {
-        feature = "stable" => { r#"Software\Classes\WuContextMenu"# },
-        _ => { r#"Software\Classes\WuDevContextMenu"# },
+        feature = "stable" => { r#"Software\Classes\WuPlusContextMenu"# },
+        _ => { r#"Software\Classes\WuPlusDevContextMenu"# },
     };
 
     let key = windows_registry::CURRENT_USER.open(REG_PATH)?;
