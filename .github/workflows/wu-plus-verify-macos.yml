@@ -1,0 +1,65 @@
+name: Wu Plus verify macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_cache:
+        description: '使用 Rust 构建缓存'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wu-plus-verify-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_LTO: 'false'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  ZED_RELEASE_CHANNEL: dev
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          test "$(uname -m)" = arm64
+          brew install lld cmake pkgconf subversion
+      - name: Cache Rust build dependencies
+        if: inputs.rust_cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wu-plus-verify-aarch64
+          cache-bin: false
+      - name: Test Subversion backend
+        run: cargo test --locked --manifest-path plugin/Cargo.toml
+      - name: Build Apple Silicon verification app
+        run: script/bundle-mac -a aarch64-apple-darwin
+      - name: Archive app and Subversion extension
+        run: |
+          app="target/aarch64-apple-darwin/release/bundle/osx/Wu Plus Dev.app"
+          codesign --verify --deep --strict "$app"
+          artifact_dir="$RUNNER_TEMP/verification"
+          mkdir -p "$artifact_dir"
+          ditto -c -k --keepParent "$app" "$artifact_dir/Wu-Plus-Dev-arm64.zip"
+          CARGO_BUILD_TARGET=aarch64-apple-darwin scripts/package-plugin.sh "$artifact_dir"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-verify-macos-arm64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/verification/Wu-Plus-Dev-arm64.zip
+            ${{ runner.temp }}/verification/Subversion.zip
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
