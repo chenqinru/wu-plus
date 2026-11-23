@@ -58,3 +58,7 @@ xcuserdata/
 /video
 /notes
 .cache
+
+# Wu Plus build and package output
+/.build/
+/dist/

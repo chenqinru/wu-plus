@@ -1,0 +1,111 @@
+name: Wu Plus publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: '已验收的 Wu Plus candidate 工作流运行 ID'
+        required: true
+        type: string
+      approved_archive_sha256:
+        description: '已验收安装包的完整 SHA-256'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: wu-plus-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref_name == github.event.repository.default_branch
+    environment: wu-plus-release
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      APPROVED_SHA: ${{ inputs.approved_archive_sha256 }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      PUBLIC_KEY: ${{ vars.WU_PLUS_SPARKLE_PUBLIC_KEY }}
+      RELEASE_REPOSITORY: ${{ vars.WU_PLUS_RELEASE_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: candidate
+        run: |
+          [[ $CANDIDATE_RUN_ID =~ ^[1-9][0-9]*$ && $APPROVED_SHA =~ ^[0-9a-f]{64}$ && -n $PUBLIC_KEY ]]
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID")
+          revision=$(jq -er --arg branch "$DEFAULT_BRANCH" --arg repository "$GITHUB_REPOSITORY" '
+            select(.conclusion == "success" and .path == ".github/workflows/wu-plus-candidate.yml"
+              and .head_branch == $branch and .head_repository.full_name == $repository
+              and (.event == "schedule" or .event == "workflow_dispatch"))
+            | .head_sha' <<<"$run")
+          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts" --jq '
+            [.artifacts[] | select(.expired == false and (.name | endswith("-signed")) and (.name | startswith("wu-plus-v")))]
+            | if length == 1 then .[0].name else error("Expected exactly one signed candidate") end')
+          printf 'artifact=%s\nrevision=%s\n' "$artifact" "$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.candidate.outputs.artifact }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+      - name: Verify and promote the exact candidate
+        env:
+          CANDIDATE_REVISION: ${{ steps.candidate.outputs.revision }}
+          PUBLISH_TOKEN: ${{ secrets.WU_PLUS_PUBLISH_TOKEN }}
+        run: |
+          release_repository=${RELEASE_REPOSITORY:-"$GITHUB_REPOSITORY"}
+          [[ $release_repository =~ ^[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+$ ]]
+          target="$CANDIDATE_REVISION"
+          if [[ $release_repository != "$GITHUB_REPOSITORY" ]]; then
+            export GH_TOKEN="${PUBLISH_TOKEN:?Provide a token for the separate public release repository}"
+            target=$(gh api "repos/$release_repository" --jq .default_branch)
+          fi
+          [[ $(gh api "repos/$release_repository" --jq .visibility) == public ]]
+          export GH_REPO="$release_repository"
+          if [[ ! -x "$(brew --prefix openssl@3)/bin/openssl" ]]; then
+            brew install openssl@3
+          fi
+          OPENSSL="$(brew --prefix openssl@3)/bin/openssl"
+          export OPENSSL
+          candidate="$RUNNER_TEMP/candidate"
+          archive="$candidate/Wu-Plus-arm64.zip"
+          [[ $(shasum -a 256 "$archive" | awk '{print $1}') == "$APPROVED_SHA" ]]
+          ditto -x -k "$archive" "$RUNNER_TEMP/verified"
+          app="$RUNNER_TEMP/verified/Wu Plus.app"
+          codesign --verify --deep --strict "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute "$app"
+          build=$(python3 scripts/update-feed.py check "$candidate" "$app" \
+            "$GITHUB_SERVER_URL/$release_repository" "$APPROVED_SHA" "$PUBLIC_KEY" "$CANDIDATE_REVISION")
+          tag="wu-plus-$build"
+          latest=$(gh release list --exclude-drafts --exclude-pre-releases --limit 20 --json isLatest,tagName \
+            --jq '.[] | select(.isLatest) | .tagName')
+          if [[ -n $latest ]]; then
+            python3 - "$latest" "$build" <<'PY'
+          import re
+          import sys
+          latest, build = sys.argv[1:]
+          assert re.fullmatch(r"wu-plus-\d+\.\d+", latest), f"Unexpected latest release: {latest}"
+          assert tuple(map(int, build.split("."))) > tuple(map(int, latest.removeprefix("wu-plus-").split("."))), "Candidate must be newer than the live release"
+          PY
+          fi
+          # Drafts are invisible to Sparkle until every original asset is uploaded.
+          if draft=$(gh release view "$tag" --json isDraft,targetCommitish 2>/dev/null); then
+            jq -e --arg target "$target" '.isDraft and .targetCommitish == $target' <<<"$draft" >/dev/null
+          else
+            gh release create "$tag" --draft --target "$target" --title "Wu Plus $build" --notes ""
+          fi
+          gh release upload "$tag" "$archive" "$candidate/Subversion.zip" \
+            "$candidate/appcast.xml" "$candidate/candidate.json" --clobber
+          gh release edit "$tag" --draft=false --latest

@@ -1,0 +1,130 @@
+name: Wu Plus candidate
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      wu_version:
+        description: '预期的上游 Wu 标签，留空使用当前提交的固定版本'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: wu-plus-candidate
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.release.outputs.name }}
+      needed: ${{ steps.release.outputs.needed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_WU: ${{ inputs.wu_version }}
+          SIGNED: ${{ vars.WU_PLUS_SIGN_CANDIDATES }}
+          RELEASE_REPOSITORY: ${{ vars.WU_PLUS_RELEASE_REPOSITORY }}
+        run: |
+          upstream=scripts/wu-upstream.json
+          tag=$(jq -er .tag "$upstream")
+          revision=$(jq -er .revision "$upstream")
+          if [[ -n $REQUESTED_WU && $REQUESTED_WU != "$tag" ]]; then
+            printf '此提交固定在 Wu %s，请先在集成分支合入目标版本。\n' "$tag" >&2
+            exit 1
+          fi
+          if [[ $GITHUB_EVENT_NAME == schedule ]]; then
+            latest=$(scripts/upstream-release.sh | jq -er .tag)
+            if [[ $latest != "$tag" ]]; then
+              printf '上游已发布 %s，当前提交仍固定在 %s。请先合入并验收。\n' "$latest" "$tag" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          mode=local
+          if [[ $SIGNED == 1 ]]; then mode=signed; fi
+          release_repository=${RELEASE_REPOSITORY:-"$GITHUB_REPOSITORY"}
+          [[ $release_repository =~ ^[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+$ ]]
+          feed_key=$(printf '%s' "$release_repository" | sha256sum | cut -c1-10)
+          name="wu-plus-$tag-${revision:0:12}-${GITHUB_SHA:0:12}-$feed_key-$mode"
+          needed=true
+          if [[ $GITHUB_EVENT_NAME == schedule ]]; then
+            artifacts=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$name")
+            if jq -e 'any(.artifacts[]; .expired == false)' <<<"$artifacts" >/dev/null; then
+              needed=false
+            fi
+          fi
+          printf 'name=%s\nneeded=%s\n' "$name" "$needed" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.needed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 165
+    env:
+      WU_PLUS_INSTALL_RUST: '1'
+      WU_PLUS_BUILD_JOBS: '3'
+      CARGO_PROFILE_RELEASE_FAST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install build dependencies
+        run: |
+          test "$(uname -m)" = arm64
+          brew install lld cmake pkgconf subversion
+      - name: Build immutable candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ vars.WU_PLUS_RELEASE_REPOSITORY }}
+          WU_PLUS_SIGN_CANDIDATES: ${{ vars.WU_PLUS_SIGN_CANDIDATES }}
+          WU_PLUS_CODESIGN_IDENTITY: ${{ vars.WU_PLUS_CODESIGN_IDENTITY }}
+          WU_PLUS_SPARKLE_PUBLIC_KEY: ${{ vars.WU_PLUS_SPARKLE_PUBLIC_KEY }}
+          WU_PLUS_SPARKLE_PRIVATE_KEY: ${{ secrets.WU_PLUS_SPARKLE_PRIVATE_KEY }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          cp scripts/wu-upstream.json "$RUNNER_TEMP/upstream.json"
+          mkdir -p "$RUNNER_TEMP/candidate"
+          release_repository=${RELEASE_REPOSITORY:-"$GITHUB_REPOSITORY"}
+          scripts/build-candidate.sh "$RUNNER_TEMP/candidate" \
+            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" "$GITHUB_SERVER_URL/$release_repository" \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
+          {
+            echo '### Wu Plus candidate'
+            jq -r '"Wu: " + .upstream.tag, "Build: " + .build, "SHA-256: " + .archive_sha256, "Notarized: " + (.notarized | tostring)' "$RUNNER_TEMP/candidate/candidate.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ needs.discover.outputs.name }}
+          path: |
+            ${{ runner.temp }}/candidate/Wu-Plus-arm64.zip
+            ${{ runner.temp }}/candidate/Subversion.zip
+            ${{ runner.temp }}/candidate/appcast.xml
+            ${{ runner.temp }}/candidate/candidate.json
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: wu-plus-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/upstream.json
+            ${{ runner.temp }}/candidate/notary*.json
