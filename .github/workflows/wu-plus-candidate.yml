@@ -9,7 +9,7 @@ on:
         description: '预期的上游 Wu 标签，留空使用当前提交的固定版本'
         type: string
       rust_cache:
-        description: '使用 Apple Silicon 的 Rust 构建缓存'
+        description: '使用 macOS 和 Windows 的 Rust 构建缓存'
         type: boolean
         default: true
 
@@ -83,11 +83,11 @@ jobs:
           persist-credentials: false
       - name: Install dependencies
         run: brew install lld cmake pkgconf subversion
-      - name: Cache Apple Silicon Rust dependencies
-        if: matrix.arch == 'aarch64' && (github.event_name == 'schedule' || inputs.rust_cache)
+      - name: Cache macOS Rust dependencies
+        if: github.event_name == 'schedule' || inputs.rust_cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: wu-plus-candidate-aarch64
+          key: wu-plus-candidate-${{ matrix.arch }}
           cache-bin: false
       - name: Test Subversion backend
         if: matrix.arch == 'aarch64'
@@ -186,6 +186,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Cache Windows Rust dependencies
+        if: github.event_name == 'schedule' || inputs.rust_cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wu-plus-candidate-windows-x86_64
+          cache-bin: false
       - name: Bundle as upstream Wu
         run: script/bundle-windows.ps1 -Architecture x86_64
         shell: pwsh

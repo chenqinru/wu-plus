@@ -43,7 +43,7 @@ SVN 测试使用临时仓库和本机 `svnserve`，覆盖提交范围、更新�
 open -n "/path/to/Wu Plus Dev.app" --args --user-data-dir "$HOME/.wu-plus-verify"
 ~~~
 
-快速验收和 Apple Silicon 的完整候选分别配置 Rust 编译缓存。手动运行时可关闭 `rust_cache`，比较构建步骤和整次运行的耗时。其他平台目前没有配置跨运行的 Rust 构建缓存。 [快速验收配置](../.github/workflows/wu-plus-verify-macos.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
+Apple Silicon 快速验收和 macOS Apple Silicon、macOS Intel、Windows x86_64 正式候选各有独立的 Rust 编译缓存。手动运行时可用 `rust_cache` 切换缓存，比较同一提交的构建耗时。测热缓存时确认缓存已命中，并单独记录缓存恢复、保存和排队时间。 [快速验收配置](../.github/workflows/wu-plus-verify-macos.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
 
 ### 跟进 Wu 上游
 
