@@ -12,10 +12,6 @@ on:
         description: '使用 macOS 和 Windows 的 Rust 构建缓存'
         type: boolean
         default: true
-      macos_trial:
-        description: '仅构建 macOS IDE，试测关闭 LTO 和 16 个代码生成单元'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -31,7 +27,7 @@ env:
   ZED_RELEASE_CHANNEL: stable
 
 concurrency:
-  group: wu-plus-candidate-${{ github.ref }}${{ inputs.macos_trial && '-macos-trial' || '' }}
+  group: wu-plus-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -81,7 +77,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [aarch64, x86_64]
-        component: ${{ fromJSON(inputs.macos_trial && '["ide"]' || '["ide","remote-server"]') }}
+        component: [ide, remote-server]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -114,7 +110,6 @@ jobs:
         env:
           TARGET_ARCH: ${{ matrix.arch }}
           BUNDLE_MODE: ${{ matrix.component == 'ide' && '-s' || '-r' }}
-          MACOS_TRIAL: ${{ inputs.macos_trial && 'true' || 'false' }}
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -122,19 +117,7 @@ jobs:
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
-        run: |
-          if [[ $MACOS_TRIAL == true ]]; then
-            export CARGO_PROFILE_RELEASE_LTO=off
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
-          fi
-          script/bundle-mac "$BUNDLE_MODE" "$TARGET_ARCH-apple-darwin"
-      - name: Record macOS installer size
-        if: matrix.component == 'ide'
-        env:
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          dmg="target/$TARGET_ARCH-apple-darwin/release/Wu-Plus-$TARGET_ARCH.dmg"
-          printf 'macOS %s DMG bytes: %s\n' "$TARGET_ARCH" "$(stat -f %z "$dmg")" >> "$GITHUB_STEP_SUMMARY"
+        run: script/bundle-mac "$BUNDLE_MODE" "$TARGET_ARCH-apple-darwin"
       - name: Check Simplified Chinese strings and commands
         if: matrix.component == 'ide' && matrix.arch == 'aarch64'
         run: script/check-translations --binary target/aarch64-apple-darwin/release/wu
@@ -162,7 +145,7 @@ jobs:
 
   bundle-linux:
     needs: discover
-    if: needs.discover.outputs.needed == 'true' && !inputs.macos_trial
+    if: needs.discover.outputs.needed == 'true'
     timeout-minutes: 300
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -205,7 +188,7 @@ jobs:
 
   bundle-windows:
     needs: discover
-    if: needs.discover.outputs.needed == 'true' && !inputs.macos_trial
+    if: needs.discover.outputs.needed == 'true'
     runs-on: windows-2022
     timeout-minutes: 300
     steps:
@@ -243,7 +226,6 @@ jobs:
 
   manifest:
     needs: [discover, bundle-macos, bundle-linux, bundle-windows]
-    if: ${{ !inputs.macos_trial }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
