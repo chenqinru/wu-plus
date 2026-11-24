@@ -101,6 +101,7 @@ fn insert_copy(
 #[derive(Deserialize)]
 pub(super) struct Status {
     root: PathBuf,
+    expected_url: Option<String>,
     #[serde(default)]
     remote: bool,
     #[serde(default)]
@@ -353,6 +354,7 @@ fn hide_conflict_artifacts(
 
 pub(super) fn status(params: Status, cancellation: &Cancellation) -> Result<Value> {
     let copy = root_info(&params.root, cancellation)?;
+    ensure_expected_url(&copy, params.expected_url.as_deref())?;
     let local = Auth::default();
     let auth = if params.remote { &params.auth } else { &local };
     let mut entries = changes(&copy, params.remote, params.ignored, auth, cancellation)?;
@@ -457,6 +459,7 @@ fn patch_line_counts(diff: &str) -> impl Iterator<Item = (&str, DiffStat)> {
 #[derive(Deserialize)]
 pub(super) struct Read {
     root: PathBuf,
+    expected_url: Option<String>,
     #[serde(flatten)]
     operation: Operation,
     #[serde(default)]
@@ -509,6 +512,7 @@ enum Operation {
 
 pub(super) fn run(params: Read, cancellation: &Cancellation) -> Result<Value> {
     let copy = root_info(&params.root, cancellation)?;
+    ensure_expected_url(&copy, params.expected_url.as_deref())?;
     if let Operation::Conflict { path } = &params.operation {
         return conflict(&copy, path, &params.auth, cancellation);
     }

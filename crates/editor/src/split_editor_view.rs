@@ -5,13 +5,13 @@ use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Context, DragMoveEvent, Element,
     Entity, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Length,
     ParentElement, Pixels, StatefulInteractiveElement, Styled, TextStyleRefinement, Window, div,
-    linear_color_stop, linear_gradient, point, px, size,
+    point, px, size,
 };
 use multi_buffer::{Anchor, ExcerptBoundaryInfo};
 use smallvec::smallvec;
 use text::BufferId;
 use theme::ActiveTheme;
-use ui::{h_flex, prelude::*, v_flex};
+use ui::{h_flex, prelude::*};
 
 use gpui::ContentMask;
 
@@ -549,39 +549,19 @@ impl SplitBufferHeadersElement {
             latest_selection_anchors,
         );
 
-        let editor_bg_color = cx.theme().colors().editor_background;
         let selected = selected_buffer_ids.contains(&excerpt.buffer_id());
 
-        let mut header = v_flex()
-            .id("sticky-buffer-header")
-            .w(available_width)
-            .relative()
-            .child(
-                div()
-                    .w(available_width)
-                    .h(FILE_HEADER_HEIGHT as f32 * line_height)
-                    .bg(linear_gradient(
-                        0.,
-                        linear_color_stop(editor_bg_color.opacity(0.), 0.),
-                        linear_color_stop(editor_bg_color, 0.6),
-                    ))
-                    .absolute()
-                    .top_0(),
-            )
-            .child(
-                render_buffer_header(
-                    &self.rhs_editor,
-                    excerpt,
-                    false,
-                    selected,
-                    true,
-                    jump_data,
-                    window,
-                    cx,
-                )
-                .into_any_element(),
-            )
-            .into_any_element();
+        let mut header = render_buffer_header(
+            &self.rhs_editor,
+            excerpt,
+            false,
+            selected,
+            true,
+            jump_data,
+            window,
+            cx,
+        )
+        .into_any_element();
 
         let mut origin = bounds.origin;
 

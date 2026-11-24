@@ -10,15 +10,51 @@ use ui::{
 use workspace::{Item, ItemNavHistory};
 
 #[derive(Default)]
-pub(super) struct History {
+pub(super) struct PanelHistory {
     pub visible: bool,
-    path: String,
+    repositories: BTreeMap<PathBuf, History>,
+    filtered: Option<(String, History)>,
+}
+
+impl PanelHistory {
+    pub(super) fn clear(&mut self) {
+        self.repositories.clear();
+        self.filtered = None;
+    }
+
+    pub(super) fn reset_view(&mut self, root: Option<&Path>) {
+        self.filtered = None;
+        if let Some(history) = root.and_then(|root| self.repositories.get_mut(root)) {
+            history.selected = None;
+        }
+    }
+
+    fn active(&self, root: &Path) -> Option<&History> {
+        self.filtered
+            .as_ref()
+            .map(|(_, history)| history)
+            .or_else(|| self.repositories.get(root))
+    }
+
+    fn state_mut(&mut self, root: &Path, filtered: bool) -> Option<&mut History> {
+        if filtered {
+            self.filtered.as_mut().map(|(_, history)| history)
+        } else {
+            self.repositories.get_mut(root)
+        }
+    }
+
+}
+
+#[derive(Default)]
+struct History {
     entries: Vec<Revision>,
     selected: Option<u64>,
     next_before: Option<u64>,
     loaded: bool,
     failed: bool,
     loading: Option<Task<()>>,
+    interactive: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -44,6 +80,34 @@ struct ChangedPath {
 }
 
 type HistoryTask = Task<Result<Page, rpc::Error>>;
+
+struct HistoryFetch {
+    client: Arc<rpc::Client>,
+    params: Value,
+    task: Shared<HistoryTask>,
+}
+
+impl HistoryFetch {
+    async fn load(
+        self,
+        panel: &WeakEntity<SvnPanel>,
+        interactive: impl Fn(&SvnPanel) -> bool,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> Result<Page, rpc::Error> {
+        match self.task.await {
+            Err(error) if error.kind == "authentication"
+                && panel.read_with(cx, |panel, _| interactive(panel)).unwrap_or(false) =>
+            {
+                let value = authentication::retry(
+                    &self.client, self.client.next_id(), "read", self.params,
+                    error, panel, interactive, cx,
+                ).await?;
+                serde_json::from_value(value).map_err(decode_error)
+            }
+            result => result,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct Requests(BTreeMap<(PathBuf, String, Option<String>), WeakShared<HistoryTask>>);
@@ -78,7 +142,7 @@ impl Requests {
 }
 
 #[cfg(test)]
-mod request_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -103,27 +167,79 @@ mod request_tests {
         let refreshed = requests.share(root, ".", None, start);
         assert!(!first.ptr_eq(&refreshed));
     }
+
+    #[test]
+    fn switching_working_copies_reuses_history_and_pagination() {
+        let first_root = Path::new("first");
+        let second_root = Path::new("second");
+        let mut panel = PanelHistory::default();
+        let first = panel.repositories.entry(first_root.into()).or_default();
+        for (revision, append) in [(9, false), (8, true)] {
+            first.receive(
+                Page {
+                    revisions: vec![Revision {
+                        revision,
+                        author: String::new(),
+                        date: String::new(),
+                        message: String::new(),
+                        paths: Vec::new(),
+                    }],
+                    next_before: Some(revision - 1),
+                },
+                append,
+            );
+        }
+        first.selected = Some(8);
+        panel.filtered = Some(("file.txt".into(), History::default()));
+        panel.reset_view(Some(first_root));
+
+        assert!(panel.active(second_root).is_none());
+        let first = panel
+            .active(first_root)
+            .expect("cached working copy history");
+        assert_eq!(first.entries.len(), 2);
+        assert_eq!(first.next_page(), Some(7));
+        assert_eq!(first.selected, None);
+        assert!(!first.needs_load(true));
+    }
+
+    #[test]
+    fn reuses_a_successful_empty_result_until_invalidated() {
+        let mut history = History::default();
+        assert!(history.needs_load(false));
+        history.loading = Some(Task::ready(()));
+        assert!(!history.needs_load(true));
+        history.loading = None;
+        history.failed = true;
+        assert!(!history.needs_load(false));
+        assert!(history.needs_load(true));
+        history.receive(
+            Page {
+                revisions: Vec::new(),
+                next_before: None,
+            },
+            false,
+        );
+        assert!(!history.needs_load(true));
+        history.invalidate();
+        assert!(history.needs_load(false));
+    }
 }
 
 impl History {
-    pub(super) fn is_loading(&self) -> bool {
-        self.loading.is_some()
-    }
-
-    pub fn clear(&mut self) {
-        self.path = ".".into();
-        self.entries.clear();
-        self.selected = None;
-        self.next_before = None;
+    fn invalidate(&mut self) {
         self.loaded = false;
         self.failed = false;
         self.loading = None;
     }
 
-    pub fn open(&mut self, path: &str) {
-        self.clear();
-        self.path = path.to_owned();
-        self.visible = true;
+    fn needs_load(&self, retry_failed: bool) -> bool {
+        !self.loaded && self.loading.is_none() && (!self.failed || retry_failed)
+    }
+
+    fn next_page(&self) -> Option<u64> {
+        self.next_before
+            .filter(|_| self.loaded && self.loading.is_none())
     }
 
     fn receive(&mut self, page: Page, append: bool) {
@@ -142,67 +258,125 @@ impl History {
 }
 
 impl SvnPanel {
+    pub(super) fn preload_history(
+        &mut self,
+        retry_failed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.selected_root.as_deref() else {
+            return;
+        };
+        let interactive = retry_failed && self.history.visible;
+        if let Some(history) = self.history.repositories.get_mut(root) {
+            history.interactive |= interactive;
+            if !history.needs_load(retry_failed) {
+                return;
+            }
+        }
+        self.load_panel_history(None, None, false, interactive, window, cx);
+    }
+
     pub(super) fn load_history(
         &mut self,
         append: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let before = append
-            .then_some(self.history.next_before)
-            .flatten()
-            .map(|revision| revision.to_string());
-        self.load_history_page(append, before.as_deref(), None, window, cx);
+        let before = if append {
+            let Some(history) = self
+                .selected_root
+                .as_deref()
+                .and_then(|root| self.history.active(root))
+            else {
+                return;
+            };
+            let Some(revision) = history.next_page() else {
+                return;
+            };
+            Some(revision.to_string())
+        } else {
+            None
+        };
+        let path = self.history.filtered.as_ref().map(|(path, _)| path.clone());
+        self.load_panel_history(path, before.as_deref(), append, true, window, cx);
     }
 
-    pub(super) fn load_history_page(
+    pub(super) fn open_filtered_history(
         &mut self,
-        append: bool,
+        path: String,
         before: Option<&str>,
-        close_form: Option<gpui::EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.filtered = Some((path.clone(), History::default()));
+        self.history.visible = true;
+        self.load_panel_history(Some(path), before, false, true, window, cx);
+    }
+
+    fn load_panel_history(
+        &mut self,
+        path: Option<String>,
+        before: Option<&str>,
+        append: bool,
+        interactive: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(root) = self.selected_root.clone() else {
             return;
         };
-        if append && self.history.loading.is_some() {
-            return;
-        }
-        let path = if self.history.path.is_empty() {
-            ".".to_owned()
-        } else {
-            self.history.path.clone()
-        };
-        let Some(task) = self.request_history(&root, &path, before, cx) else {
+        let Some(fetch) = self.request_history(&root, path.as_deref().unwrap_or("."), before, cx)
+        else {
             cx.notify();
             return;
         };
-        self.history.failed = false;
-        self.history.loading = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                if this.selected_root.as_ref() != Some(&root) {
+        let filtered = path.is_some();
+        let history = if filtered {
+            let Some(history) = self.history.state_mut(&root, true) else {
+                return;
+            };
+            history
+        } else {
+            self.history.repositories.entry(root.clone()).or_default()
+        };
+        history.failed = false;
+        history.interactive = interactive;
+        history.loading = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = fetch.load(&this, |panel| {
+                panel.selected_root.as_ref() == Some(&root)
+                    && panel.history.visible
+                    && filtered == panel.history.filtered.is_some()
+                    && panel.history.active(&root).is_some_and(|history| history.interactive)
+            }, cx).await;
+            this.update_in(cx, |this, _, cx| {
+                let selected = this.selected_root.as_ref() == Some(&root);
+                if filtered && !selected {
                     return;
                 }
-                this.history.loading = None;
+                let active =
+                    selected && this.history.visible && filtered == this.history.filtered.is_some();
+                let Some(history) = this.history.state_mut(&root, filtered) else {
+                    return;
+                };
+                history.loading = None;
                 match result {
-                    Ok(page) => {
-                        this.history.receive(page, append);
-                        if close_form.is_some()
-                            && this.form.as_ref().and_then(form::Form::first_field_id) == close_form
+                    Ok(page) => history.receive(page, append),
+                    Err(error) => {
+                        history.failed = true;
+                        if active && error.kind != "cancelled"
+                            && (error.kind != "authentication" || history.interactive)
                         {
-                            this.form = None;
+                            let url = this.repo().map(|repo| repo.copy.url.clone());
+                            this.set_error(error, url, cx);
                         }
                     }
-                    Err(error) => {
-                        this.history.failed = true;
-                        let url = this.repo().map(|repo| repo.copy.url.clone());
-                        this.set_error(error, url, cx);
-                    }
                 }
-                cx.notify();
-            });
+                if active {
+                    cx.notify();
+                }
+            })
+            .log_err();
         }));
         cx.notify();
     }
@@ -213,31 +387,82 @@ impl SvnPanel {
         path: &str,
         before: Option<&str>,
         cx: &App,
-    ) -> Option<Shared<HistoryTask>> {
+    ) -> Option<HistoryFetch> {
         let client = self.client.clone()?;
         let before = before.filter(|revision| *revision != "HEAD");
         let params = self.repository_params(
             root,
             json!({"operation":"history", "path":path, "before":before}),
         );
-        Some(self.history_requests.share(root, path, before, || {
+        let task = self.history_requests.share(root, path, before, || {
+            let client = client.clone();
+            let params = params.clone();
             cx.background_spawn(async move {
                 let value = client.request(client.next_id(), "read", params).await?;
                 serde_json::from_value(value).map_err(decode_error)
             })
-        }))
+        });
+        Some(HistoryFetch { client, params, task })
     }
 
-    pub(super) fn reload_history_for(
+    pub(super) fn discard_history_for(&mut self, root: &Path) {
+        self.history_requests.invalidate(root);
+        self.history.repositories.remove(root);
+        if self.selected_root.as_deref() == Some(root) {
+            self.history.filtered = None;
+            if self.history.visible {
+                self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+            }
+        }
+    }
+
+    pub(super) fn invalidate_repository_history(&mut self, root: &Path) {
+        self.history_requests.invalidate(root);
+        if let Some(history) = self.history.repositories.get_mut(root) {
+            history.invalidate();
+        }
+    }
+
+    pub(super) fn reconcile_repository_history(&mut self, repos: &[Repo]) {
+        self.history.repositories.retain(|root, _| {
+            let present = repos.iter().any(|repo| &repo.copy.root == root);
+            if !present {
+                self.history_requests.invalidate(root);
+            }
+            present
+        });
+        for repo in repos {
+            self.reconcile_working_copy_history(&repo.copy);
+        }
+    }
+
+    pub(super) fn reconcile_working_copy_history(&mut self, copy: &Copy) {
+        let Some(previous) = self.repos.iter().find(|repo| repo.copy.root == copy.root) else {
+            return;
+        };
+        if copy.url != previous.copy.url || copy.repository_url != previous.copy.repository_url {
+            self.discard_history_for(&copy.root);
+        } else if copy.revision != previous.copy.revision {
+            self.invalidate_repository_history(&copy.root);
+        }
+    }
+
+    pub(super) fn invalidate_history_after_write(
         &mut self,
-        root: &std::path::Path,
+        root: &Path,
+        switched: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.history_requests.invalidate(root);
-        if self.selected_root.as_deref() == Some(root) {
-            self.history.loaded = false;
-            if self.history.visible {
+        // The following status scan preloads the repository history using the updated working copy.
+        if switched {
+            self.discard_history_for(root);
+        } else {
+            self.invalidate_repository_history(root);
+            if self.selected_root.as_deref() == Some(root)
+                && self.history.visible
+                && self.history.filtered.is_some()
+            {
                 self.load_history(false, window, cx);
             }
         }
@@ -254,7 +479,7 @@ impl SvnPanel {
             .collect::<Vec<_>>();
         for (log, path) in logs {
             if let Some(task) = self.request_history(root, &path, None, cx) {
-                log.update(cx, |log, cx| log.load(task, false, window, cx));
+                log.update(cx, |log, cx| log.load(task, false, false, window, cx));
             }
         }
     }
@@ -284,7 +509,7 @@ impl SvnPanel {
                 return;
             };
             let log = cx.new(|cx| LogView::new(panel, root, path, name, window, cx));
-            log.update(cx, |log, cx| log.load(task, false, window, cx));
+            log.update(cx, |log, cx| log.load(task, false, true, window, cx));
             let search = log.read(cx).search.focus_handle(cx);
             workspace.add_item_to_active_pane(Box::new(log), None, true, window, cx);
             search.focus(window, cx);
@@ -420,21 +645,17 @@ impl SvnPanel {
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.busy {
+                    if this.busy
+                        || (this.history.visible == history
+                            && this.history.filtered.is_none())
+                    {
                         return;
                     }
-                    this.form = None;
                     this.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                    this.history.reset_view(this.selected_root.as_deref());
+                    this.history.visible = history;
                     if history {
-                        if this.history.path != "." {
-                            this.history.open(".");
-                        }
-                        this.history.visible = true;
-                        if !this.history.loaded && this.history.loading.is_none() {
-                            this.load_history(false, window, cx);
-                        }
-                    } else {
-                        this.history.visible = false;
+                        this.preload_history(true, window, cx);
                     }
                     cx.notify();
                 }))
@@ -461,17 +682,22 @@ impl SvnPanel {
         let graph = self.view_options.history_graph;
         let accent = colors.text_accent;
         let background = colors.panel_background;
-        if self.history.entries.is_empty() {
-            let loading = self.history.loading.is_some() || self.busy;
+        let history = self
+            .selected_root
+            .as_deref()
+            .and_then(|root| self.history.active(root));
+        let Some(history) = history.filter(|history| !history.entries.is_empty()) else {
+            let loading = history.is_some_and(|history| history.loading.is_some())
+                || (self.scanning && history.is_none_or(|history| history.needs_load(false)));
             let message = if loading {
                 t!("Loading Commit History…")
-            } else if self.history.failed {
+            } else if history.is_some_and(|history| history.failed) {
                 t!("Failed to load commit history")
             } else {
                 t!("No commits yet")
             };
             return panel_ui::panel_placeholder(message, loading).into_any_element();
-        }
+        };
         let now = time::OffsetDateTime::now_utc();
         let dot = || {
             Label::new("•")
@@ -481,24 +707,30 @@ impl SvnPanel {
                 .flex_none()
         };
         panel
-            .when(self.history.path != ".", |panel| {
-                panel.child(
-                    div().px_2().py_1().child(
-                        Label::new(self.history.path.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .truncate_middle(),
-                    ),
-                )
-            })
-            .children(
+            .when_some(
                 self.history
+                    .filtered
+                    .as_ref()
+                    .filter(|(path, _)| path != "."),
+                |panel, (path, _)| {
+                    panel.child(
+                        div().px_2().py_1().child(
+                            Label::new(path.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate_middle(),
+                        ),
+                    )
+                },
+            )
+            .children(
+                history
                     .entries
                     .iter()
                     .enumerate()
                     .map(|(index, entry)| {
                         let revision = entry.revision;
-                        let expanded = self.history.selected == Some(revision);
+                        let expanded = history.selected == Some(revision);
                         let subject = entry.message.lines().next().unwrap_or_default().to_owned();
                         let age = time::OffsetDateTime::parse(
                             &entry.date,
@@ -562,10 +794,7 @@ impl SvnPanel {
                                                                     })
                                                                     .bottom(
                                                                         if index + 1
-                                                                            == self
-                                                                                .history
-                                                                                .entries
-                                                                                .len()
+                                                                            == history.entries.len()
                                                                             || expanded
                                                                         {
                                                                             rems(0.875)
@@ -644,7 +873,13 @@ impl SvnPanel {
                                     .tooltip(Tooltip::text(tooltip))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.focus.focus(window, cx);
-                                        this.history.selected = (!expanded).then_some(revision);
+                                        let filtered = this.history.filtered.is_some();
+                                        if let Some(root) = this.selected_root.as_deref()
+                                            && let Some(history) =
+                                                this.history.state_mut(root, filtered)
+                                        {
+                                            history.selected = (!expanded).then_some(revision);
+                                        }
                                         cx.notify();
                                     })),
                             )
@@ -701,11 +936,11 @@ impl SvnPanel {
                             })
                     }),
             )
-            .when(self.history.next_before.is_some(), |panel| {
+            .when(history.next_before.is_some(), |panel| {
                 panel.child(
                     div().px_2().py_2().child(
                         Button::new("svn-more-history", t!("Next"))
-                            .disabled(self.busy || self.history.loading.is_some())
+                            .disabled(self.busy || history.next_page().is_none())
                             .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.load_history(true, window, cx)
@@ -816,23 +1051,26 @@ impl LogView {
         }) else {
             return;
         };
-        self.load(task, append, window, cx);
+        self.load(task, append, true, window, cx);
     }
 
     fn load(
         &mut self,
-        task: Shared<HistoryTask>,
+        fetch: HistoryFetch,
         append: bool,
+        interactive: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.error = None;
+        let panel = self.panel.clone();
         self.history.loading = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
+            let result = fetch.load(&panel, |_| interactive, cx).await;
             let _ = this.update_in(cx, |this, _, cx| {
                 this.history.loading = None;
                 match result {
                     Ok(page) => this.history.receive(page, append),
+                    Err(error) if error.kind == "cancelled" => {}
                     Err(error) if this.history.entries.is_empty() => {
                         this.error = Some(error.message)
                     }

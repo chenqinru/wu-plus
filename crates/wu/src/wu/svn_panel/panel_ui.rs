@@ -968,7 +968,6 @@ impl SvnPanel {
         };
         let multiple = rows.len() > 1;
         let panel = cx.weak_entity();
-        let branch_panel = panel.clone();
         let active = repo.root.clone();
         let branch = repo.short_branch();
         let repository_label = repo.location.clone().unwrap_or_else(|| repo.name.clone());
@@ -1007,38 +1006,23 @@ impl SvnPanel {
                     RepositoryPicker::new(rows.clone(), active.clone(), panel.clone(), window, cx)
                 }))
             });
-        let branch_picker = PopoverMenu::new("svn-branch-picker")
-            .trigger_with_tooltip(
-                Button::new("svn-branch", branch)
-                    .size(ButtonSize::None)
-                    .label_size(LabelSize::Small)
-                    .truncate(true)
-                    .disabled(self.busy || self.client.is_none()),
-                Tooltip::text(branch_tooltip),
-            )
-            .anchor(anchor)
-            .offset(offset)
-            .menu(move |window, cx| {
-                let (client, params) = branch_panel
-                    .read_with(cx, |panel, _| {
-                        let client = panel.client.clone()?;
-                        let params = panel
-                            .repository_params(&copy.root, json!({"operation":"switch_targets"}));
-                        Some((client, params))
-                    })
-                    .ok()
-                    .flatten()?;
-                Some(cx.new(|cx| {
-                    branch_picker::BranchPicker::new(
-                        branch_panel.clone(),
-                        copy.clone(),
-                        client,
-                        params,
+        let branch_picker = Button::new("svn-branch", branch)
+            .size(ButtonSize::None)
+            .label_size(LabelSize::Small)
+            .truncate(true)
+            .disabled(self.busy || self.client.is_none())
+            .tooltip(Tooltip::text(branch_tooltip))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.selected_root.as_ref() == Some(&copy.root) {
+                    this.run(
+                        "read",
+                        json!({"operation":"switch_targets"}),
+                        Output::BranchPicker,
                         window,
                         cx,
-                    )
-                }))
-            });
+                    );
+                }
+            }));
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1144,9 +1128,6 @@ impl SvnPanel {
     }
 
     fn workspace_placeholder(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.form.is_some() {
-            return None;
-        }
         if let Some(error) = &self.scan_error {
             return Some(
                 panel_placeholder(t!("Error loading: {error}", error = error.as_str()), false)
@@ -1163,6 +1144,13 @@ impl SvnPanel {
         }
         if self.repo().is_some() {
             return None;
+        }
+        if self.busy {
+            return Some(
+                panel_placeholder(t!("Running SVN operation…"), true)
+                    .child(self.cancel_operation(cx))
+                    .into_any_element(),
+            );
         }
         if self.scanning {
             return Some(
@@ -1607,7 +1595,6 @@ impl SvnPanel {
         if !self.focus.is_focused(window)
             || self.busy
             || self.history.visible
-            || self.form.is_some()
         {
             return;
         }
@@ -1986,9 +1973,6 @@ impl Render for SvnPanel {
                                             .min_w_0()
                                             .track_scroll(&self.scroll)
                                             .overflow_y_scroll()
-                                            .when_some(self.form.as_ref(), |element, form| {
-                                                element.child(self.render_form(form, cx))
-                                            })
                                             .when(self.repo().is_some(), |element| {
                                                 if self.history.visible {
                                                     element.child(self.render_history(window, cx))

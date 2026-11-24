@@ -1,4 +1,6 @@
 use super::*;
+use gpui::{DismissEvent, Render};
+use workspace::ModalView;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -20,19 +22,20 @@ pub(super) enum Kind {
 }
 
 pub(super) struct Form {
-    pub(super) kind: Kind,
+    panel: WeakEntity<SvnPanel>,
+    root: Option<PathBuf>,
+    working_copy_url: Option<String>,
+    kind: Kind,
     paths: Vec<String>,
     path: String,
     missing_field: Option<usize>,
+    error: Option<SharedString>,
     fields: Vec<(SharedString, Entity<Editor>)>,
-    remember: bool,
     with_externals: bool,
-}
-
-impl Form {
-    pub(super) fn first_field_id(&self) -> Option<gpui::EntityId> {
-        self.fields.first().map(|(_, field)| field.entity_id())
-    }
+    advanced: bool,
+    choosing_directory: bool,
+    authentication: Option<(Entity<authentication::CredentialsModal>, Subscription)>,
+    preview: Option<Entity<Editor>>,
 }
 
 impl Kind {
@@ -56,53 +59,39 @@ impl Kind {
         }
     }
 
-    fn fields(self) -> Vec<(SharedString, &'static str, bool, bool)> {
-        let url = || (t!("SVN URL"), "url", false, false);
-        let rev = || (t!("Revision (optional)"), "revision", false, false);
-        let username = || (t!("Username"), "username", false, false);
-        let password = || (t!("Password"), "password", false, true);
-        let message = || (t!("Commit Message"), "message", true, false);
+    fn fields(self) -> Vec<(SharedString, &'static str, bool)> {
+        let url = || (t!("SVN URL"), "url", false);
+        let rev = || (t!("Revision (optional)"), "revision", false);
+        let message = || (t!("Commit Message"), "message", true);
         match self {
-            Self::Checkout => vec![
-                url(),
-                (t!("Absolute Destination Path"), "destination", false, false),
-                rev(),
-                username(),
-                password(),
-            ],
+            Self::Checkout => vec![url(), rev()],
             Self::Update | Self::DiffRevision | Self::Blame => vec![rev()],
-            Self::History => vec![(t!("Start Revision (optional)"), "before", false, false)],
+            Self::History => vec![(t!("Start Revision (optional)"), "before", false)],
             Self::Branches => vec![url()],
             Self::CopyBranch => vec![
-                (t!("Source URL"), "source", false, false),
-                (t!("Destination URL"), "destination", false, false),
+                (t!("Source URL"), "source", false),
+                (t!("Destination URL"), "destination", false),
                 rev(),
                 message(),
             ],
             Self::Switch => vec![url(), rev()],
             Self::Merge => vec![
-                (t!("Source URL"), "source", false, false),
+                (t!("Source URL"), "source", false),
                 (
                     t!("Revision Range (optional, e.g. 12:16)"),
                     "revisions",
                     false,
-                    false,
                 ),
             ],
-            Self::Move => vec![(
-                t!("New Working Copy Relative Path"),
-                "destination",
-                false,
-                false,
-            )],
-            Self::Changelist => vec![(t!("Changelist Name"), "name", false, false)],
+            Self::Move => vec![(t!("New Working Copy Relative Path"), "destination", false)],
+            Self::Changelist => vec![(t!("Changelist Name"), "name", false)],
             Self::SetProperty => vec![
-                (t!("Property Name"), "name", false, false),
-                (t!("Property Value"), "value", true, false),
+                (t!("Property Name"), "name", false),
+                (t!("Property Value"), "value", true),
             ],
-            Self::RemoveProperty => vec![(t!("Property Name"), "name", false, false)],
-            Self::Lock => vec![(t!("Lock Comment (optional)"), "message", false, false)],
-            Self::Credentials => vec![username(), password()],
+            Self::RemoveProperty => vec![(t!("Property Name"), "name", false)],
+            Self::Lock => vec![(t!("Lock Comment (optional)"), "message", false)],
+            Self::Credentials => Vec::new(),
         }
     }
 }
@@ -166,257 +155,385 @@ impl SvnPanel {
                 return;
             }
         }
-        let fields = kind
-            .fields()
-            .into_iter()
-            .map(|(label, key, multiline, masked)| {
-                let initial = match (kind, key) {
-                    (Kind::Branches, "url") => {
-                        self.repo().map(|repo| repo.copy.repository_url.as_str())
-                    }
-                    (Kind::CopyBranch, "source") | (Kind::Switch, "url") => {
-                        self.repo().map(|repo| repo.copy.url.as_str())
-                    }
-                    (Kind::Credentials, "username") => self
-                        .selected_root
-                        .as_ref()
-                        .and_then(|root| self.credentials.get(root))
-                        .map(|auth| auth.username.as_str()),
-                    _ => None,
-                };
-                let field = cx.new(|cx| {
-                    let mut editor = if multiline {
-                        Editor::auto_height(3, 8, window, cx)
-                    } else {
-                        Editor::single_line(window, cx)
-                    };
-                    editor.set_placeholder_text(label.as_ref(), window, cx);
-                    if let Some(initial) = initial {
-                        editor.set_text(initial.to_owned(), window, cx);
-                    }
-                    if masked {
-                        editor.set_masked(true, cx);
-                    }
-                    editor
-                });
-                cx.observe(&field, |this, _, cx| {
-                    if this
-                        .form
-                        .as_ref()
-                        .is_some_and(|form| form.missing_field.is_some())
-                    {
-                        cx.notify();
-                    }
-                })
-                .detach();
-                (label, field)
-            })
-            .collect::<Vec<_>>();
-        if let Some((_, first)) = fields.first() {
-            first.focus_handle(cx).focus(window, cx);
+        if kind == Kind::Credentials {
+            self.manage_credentials(window, cx);
+            return;
         }
-        self.form = Some(Form {
-            kind,
-            paths,
-            path,
-            missing_field: None,
-            fields,
-            remember: false,
-            with_externals: kind == Kind::Checkout,
+
+        let root = self.selected_root.clone();
+        let working_copy_url = self.repo().map(|repo| repo.copy.url.clone());
+        let initial_url = self.repo().map(|repo| {
+            if kind == Kind::Branches {
+                repo.copy.repository_url.clone()
+            } else {
+                repo.copy.url.clone()
+            }
         });
+        let panel = cx.weak_entity();
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.toggle_modal(window, cx, |window, cx| {
+                        let fields = kind
+                            .fields()
+                            .into_iter()
+                            .map(|(label, key, multiline)| {
+                                let editor = cx.new(|cx| {
+                                    let mut editor = if multiline {
+                                        Editor::auto_height(3, 8, window, cx)
+                                    } else {
+                                        Editor::single_line(window, cx)
+                                    };
+                                    editor.set_placeholder_text(label.as_ref(), window, cx);
+                                    if matches!(
+                                        (kind, key),
+                                        (Kind::Branches | Kind::Switch, "url")
+                                            | (Kind::CopyBranch, "source")
+                                    ) && let Some(url) = &initial_url
+                                    {
+                                        editor.set_text(url.clone(), window, cx);
+                                    }
+                                    editor
+                                });
+                                (label, editor)
+                            })
+                            .collect();
+                        if let Some(panel) = panel.upgrade() {
+                            cx.observe(&panel, |_, _, cx| cx.notify()).detach();
+                        }
+                        Form {
+                            panel,
+                            root,
+                            working_copy_url,
+                            kind,
+                            paths,
+                            path,
+                            missing_field: None,
+                            error: None,
+                            fields,
+                            with_externals: kind == Kind::Checkout,
+                            advanced: false,
+                            choosing_directory: false,
+                            authentication: None,
+                            preview: None,
+                        }
+                    });
+                })
+                .log_err();
+        });
+    }
+}
+
+impl Focusable for Form {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.authentication.as_ref().map_or_else(
+            || {
+                self.fields
+                    .first()
+                    .expect("parameter form has an editor")
+                    .1
+                    .focus_handle(cx)
+            },
+            |(modal, _)| modal.focus_handle(cx),
+        )
+    }
+}
+
+impl EventEmitter<DismissEvent> for Form {}
+impl ModalView for Form {}
+
+impl Form {
+    pub(super) fn show_authentication(
+        &mut self,
+        modal: Entity<authentication::CredentialsModal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        let subscription = cx.subscribe_in(
+            &modal,
+            window,
+            move |this, _, _: &DismissEvent, window, cx| {
+                this.authentication = None;
+                if let Some(focus) = &previous_focus {
+                    focus.focus(window, cx);
+                }
+                cx.notify();
+            },
+        );
+        modal.focus_handle(cx).focus(window, cx);
+        self.authentication = Some((modal, subscription));
         cx.notify();
     }
 
-    fn submit_form(&mut self, alternate: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut form) = self.form.take() else {
+    pub(super) fn show_preview(
+        &mut self,
+        mut text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.trim().is_empty() {
+            text = t!("No changes").to_string();
+        }
+        self.preview = Some(cx.new(|cx| {
+            let mut editor = Editor::auto_height(3, 10, window, cx);
+            editor.set_text(text, window, cx);
+            editor.set_read_only(true);
+            editor
+        }));
+        cx.notify();
+    }
+
+    fn submit(&mut self, alternate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.choosing_directory
+            || self
+                .panel
+                .read_with(cx, |panel, _| panel.busy)
+                .unwrap_or(true)
+        {
             return;
-        };
-        form.missing_field = None;
-        let kind = form.kind;
-        let mut params = json!({"path": form.path, "paths":form.paths});
-        for ((_, editor), (_, key, _, _)) in form.fields.iter().zip(kind.fields()) {
+        }
+        self.missing_field = None;
+        self.error = None;
+        let kind = self.kind;
+        let mut params = json!({"path": self.path, "paths": self.paths});
+        let fields = kind.fields();
+        for ((_, editor), (_, key, _)) in self.fields.iter().zip(&fields) {
             let value = editor.read(cx).text(cx);
-            params[key] = if matches!(key, "value" | "message") && !value.is_empty() {
+            params[*key] = if matches!(*key, "value" | "message") && !value.is_empty() {
                 json!(value)
             } else if !value.trim().is_empty() {
-                if key == "password" {
-                    json!(value)
-                } else {
-                    json!(value.trim())
-                }
+                json!(value.trim())
             } else {
                 Value::Null
             };
         }
         let required: &[&str] = match kind {
-            Kind::Checkout => &["url", "destination"],
+            Kind::Checkout => &["url"],
             Kind::CopyBranch => &["source", "destination", "message"],
             Kind::Switch => &["url"],
             Kind::Merge => &["source"],
             Kind::Move => &["destination"],
             Kind::Changelist | Kind::SetProperty | Kind::RemoveProperty => &["name"],
-            Kind::Credentials if params["password"].is_string() => &["username"],
             _ => &[],
         };
-        let fields = kind.fields();
-        if let Some(index) = fields.iter().position(|(_, key, _, _)| {
+        if let Some(index) = fields.iter().position(|(_, key, _)| {
             required.contains(key)
-                && params[key]
+                && params[*key]
                     .as_str()
                     .is_none_or(|value| value.trim().is_empty())
         }) {
-            let (_, editor) = &form.fields[index];
-            editor.focus_handle(cx).focus(window, cx);
-            form.missing_field = Some(index);
-            self.form = Some(form);
+            self.fields[index].1.focus_handle(cx).focus(window, cx);
+            self.missing_field = Some(index);
             cx.notify();
             return;
         }
-        if kind == Kind::Credentials {
-            if let Some(root) = self.selected_root.clone() {
-                self.history_requests.invalidate(&root);
-                if let Some(username) = params["username"].as_str() {
-                    self.credentials.insert(
-                        root,
-                        Credentials {
-                            username: username.to_owned(),
-                            password: params["password"].as_str().map(str::to_owned),
-                            remember: form.remember,
-                        },
-                    );
-                    self.show_status(
-                        t!("SVN credentials set for this working copy. Retry the operation."),
-                        false,
-                        cx,
-                    );
-                } else {
-                    self.credentials.remove(&root);
-                    self.show_status(t!("Using SVN command-line credentials."), false, cx);
-                }
-            }
-            self.error_kind = None;
-            self.certificate_target = None;
-            cx.notify();
-            return;
-        }
-        let (method, operation, output, confirm) = match kind {
-            Kind::Checkout => {
-                if params["username"].is_string() || params["password"].is_string() {
-                    params["auth"] = json!({
-                        "username":params["username"].as_str().unwrap_or_default(),
-                        "password":params["password"],
-                        "remember":form.remember,
-                    });
-                }
-                params
-                    .as_object_mut()
-                    .expect("parameters")
-                    .remove("password");
-                ("write", "checkout", Output::Checkout, false)
-            }
-            Kind::Update => ("write", "update", Output::Change, true),
-            Kind::DiffRevision => ("read", "diff", Output::Diff, false),
-            Kind::History => {
-                self.error_kind = None;
-                self.certificate_target = None;
-                self.history.open(&form.path);
-                let close_form = if alternate { None } else { form.first_field_id() };
-                self.form = Some(form);
-                self.load_history_page(false, params["before"].as_str(), close_form, window, cx);
-                return;
-            }
-            Kind::Blame => ("read", "blame", Output::Blame, false),
-            Kind::Branches => ("read", "branches", Output::Text, false),
-            Kind::CopyBranch => ("write", "copy_branch", Output::Change, true),
-            Kind::Switch => ("write", "switch", Output::Change, true),
-            Kind::Merge => {
-                params["dry_run"] = json!(alternate);
-                ("write", "merge", Output::Text, !alternate)
-            }
-            Kind::Move => ("write", "move", Output::Change, true),
-            Kind::Changelist => ("write", "changelist", Output::Change, false),
-            Kind::SetProperty => {
-                if params["value"].is_null() {
-                    params["value"] = json!("");
-                }
-                ("write", "set_property", Output::Change, false)
-            }
-            Kind::RemoveProperty => ("write", "set_property", Output::Change, true),
-            Kind::Lock => ("write", "lock", Output::Change, false),
-            Kind::Credentials => return,
-        };
+
         if matches!(kind, Kind::Checkout | Kind::Update) {
-            params["with_externals"] = json!(form.with_externals);
+            params["with_externals"] = json!(self.with_externals);
         }
-        params["operation"] = json!(operation);
-        params["close_form"] = json!(!alternate);
-        if confirm {
-            let mut targets = form.paths.clone();
-            if let Some(destination) = params["destination"]
-                .as_str()
-                .or_else(|| params["url"].as_str())
-                .or_else(|| params["source"].as_str())
-            {
-                targets.push(destination.to_owned());
-            }
-            let root = self
-                .selected_root
-                .as_ref()
-                .map(|root| root.display().to_string())
-                .unwrap_or_default();
-            let detail = format!("{root}\n{}", targets.join("\n"));
-            self.form = Some(form);
-            self.confirm(kind.label(), detail, method, params, output, window, cx);
+        if kind == Kind::Checkout {
+            let Some(name) = params["url"].as_str().and_then(checkout_name) else {
+                self.fields[0].1.focus_handle(cx).focus(window, cx);
+                self.error = Some(t!(
+                    "Enter a valid SVN URL without embedded credentials. Percent-encode spaces."
+                ));
+                cx.notify();
+                return;
+            };
+            let destination = cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(t!("Select as Repository Destination")),
+            });
+            self.choosing_directory = true;
+            cx.notify();
+            cx.spawn_in(window, async move |this, cx| {
+                let destination = destination.await;
+                this.update_in(cx, |this, window, cx| {
+                    this.choosing_directory = false;
+                    match destination {
+                        Ok(Ok(Some(mut paths))) => {
+                            if let Some(parent) = paths.pop() {
+                                params["destination"] = json!(parent.join(name));
+                                this.dispatch(params, false, window, cx);
+                            }
+                        }
+                        Ok(Err(error)) => this.error = Some(error.to_string().into()),
+                        Err(error) => log::debug!("SVN directory picker closed: {error}"),
+                        Ok(Ok(None)) => {}
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            })
+            .detach();
         } else {
-            self.form = Some(form);
-            self.run(method, params, output, window, cx);
+            self.dispatch(params, alternate, window, cx);
         }
-        cx.notify();
     }
 
-    pub(super) fn render_form(&self, form: &Form, cx: &mut Context<Self>) -> AnyElement {
-        let disabled = self.busy || (form.kind == Kind::History && self.history.is_loading());
-        let cancel = if self.busy && self.repo().is_none() {
-            self.cancel_operation(cx).into_any_element()
-        } else {
-            Button::new("svn-cancel-form", t!("Cancel"))
-                .disabled(disabled)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.form = None;
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
-        let mut selected = form.paths.iter().take(6).cloned().collect::<Vec<_>>();
-        if form.paths.len() > selected.len() {
-            selected.push(format!("… (+{})", form.paths.len() - selected.len()));
+    fn dispatch(
+        &mut self,
+        mut params: Value,
+        alternate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = self.kind;
+        let panel = self.panel.clone();
+        let root = self.root.clone();
+        let working_copy_url = self.working_copy_url.clone();
+        if !alternate {
+            cx.emit(DismissEvent);
+        }
+        window.defer(cx, move |window, cx| {
+            panel
+                .update(cx, |panel, cx| {
+                    if panel.busy
+                        || (kind != Kind::Checkout
+                            && (panel.selected_root != root
+                                || panel.repo().map(|repo| &repo.copy.url)
+                                    != working_copy_url.as_ref()))
+                    {
+                        return;
+                    }
+                    let (method, operation, output, confirm) = match kind {
+                        Kind::Checkout => ("write", "checkout", Output::Checkout, false),
+                        Kind::Update => ("write", "update", Output::Change, true),
+                        Kind::DiffRevision => ("read", "diff", Output::Diff, false),
+                        Kind::History => {
+                            let path = params["path"].as_str().unwrap_or(".").to_owned();
+                            panel.open_filtered_history(
+                                path,
+                                params["before"].as_str(),
+                                window,
+                                cx,
+                            );
+                            return;
+                        }
+                        Kind::Blame => ("read", "blame", Output::Blame, false),
+                        Kind::Branches => ("read", "branches", Output::Text, false),
+                        Kind::CopyBranch => ("write", "copy_branch", Output::Change, true),
+                        Kind::Switch => ("write", "switch", Output::Change, true),
+                        Kind::Merge => {
+                            params["dry_run"] = json!(alternate);
+                            let output = if alternate {
+                                Output::MergePreview
+                            } else {
+                                Output::Text
+                            };
+                            ("write", "merge", output, !alternate)
+                        }
+                        Kind::Move => ("write", "move", Output::Change, true),
+                        Kind::Changelist => ("write", "changelist", Output::Change, false),
+                        Kind::SetProperty => {
+                            if params["value"].is_null() {
+                                params["value"] = json!("");
+                            }
+                            ("write", "set_property", Output::Change, false)
+                        }
+                        Kind::RemoveProperty => ("write", "set_property", Output::Change, true),
+                        Kind::Lock => ("write", "lock", Output::Change, false),
+                        Kind::Credentials => return,
+                    };
+                    params["operation"] = json!(operation);
+                    if confirm {
+                        let detail = root
+                            .as_deref()
+                            .into_iter()
+                            .map(|root| root.display().to_string())
+                            .chain(
+                                params["paths"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .chain(
+                                params["destination"]
+                                    .as_str()
+                                    .or_else(|| params["url"].as_str())
+                                    .or_else(|| params["source"].as_str())
+                                    .map(str::to_owned),
+                            )
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        panel.confirm(kind.label(), detail, method, params, output, window, cx);
+                    } else {
+                        panel.run(method, params, output, window, cx);
+                    }
+                })
+                .log_err();
+        });
+    }
+}
+
+fn checkout_name(address: &str) -> Option<String> {
+    let url = url::Url::parse(address).ok()?;
+    if !matches!(url.scheme(), "file" | "svn" | "svn+ssh" | "http" | "https")
+        || url.password().is_some()
+        || (!url.username().is_empty() && url.scheme() != "svn+ssh")
+        || address
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let segment = url
+        .path_segments()?
+        .rev()
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("repository");
+    let name = urlencoding::decode(segment).ok()?;
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':', '\0']) {
+        return None;
+    }
+    Some(name.into_owned())
+}
+
+impl Render for Form {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((modal, _)) = &self.authentication {
+            return modal.clone().into_any_element();
+        }
+        let merge = self.kind == Kind::Merge;
+        let checkout = self.kind == Kind::Checkout;
+        let show_externals = (checkout && self.advanced) || self.kind == Kind::Update;
+        let disabled = self.choosing_directory
+            || self
+                .panel
+                .read_with(cx, |panel, _| panel.busy)
+                .unwrap_or(true);
+        let mut selected = self.paths.iter().take(6).cloned().collect::<Vec<_>>();
+        if self.paths.len() > selected.len() {
+            selected.push(format!("… (+{})", self.paths.len() - selected.len()));
         }
         let selected = selected.join("\n");
-        let action = form.kind.label();
-        let auth = matches!(form.kind, Kind::Checkout | Kind::Credentials);
-        let merge = form.kind == Kind::Merge;
-        let externals = matches!(form.kind, Kind::Checkout | Kind::Update);
         v_flex()
+            .key_context("menu")
+            .elevation_3(cx)
+            .w(rems(34.))
+            .p_3()
             .gap_2()
-            .px_2()
-            .pt_2()
-            .pb_1()
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .child(
-                Label::new(action)
-                    .size(LabelSize::Small)
-                    .weight(gpui::FontWeight::SEMIBOLD),
+            .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_action(
+                cx.listener(|this, _: &menu::Confirm, window, cx| this.submit(false, window, cx)),
             )
+            .child(Label::new(self.kind.label()).weight(gpui::FontWeight::SEMIBOLD))
             .when(!selected.is_empty(), |form| {
                 form.child(Label::new(selected).color(Color::Muted))
             })
             .children(
-                form.fields
+                self.fields
                     .iter()
                     .enumerate()
+                    .filter(|(index, _)| !checkout || *index == 0 || self.advanced)
                     .map(|(index, (label, field))| {
-                        let invalid = form.missing_field == Some(index)
+                        let invalid = self.missing_field == Some(index)
                             && field.read(cx).text(cx).trim().is_empty();
                         v_flex()
                             .gap_1()
@@ -446,73 +563,85 @@ impl SvnPanel {
                             })
                     }),
             )
-            .when(cfg!(target_os = "macos") && auth, |element| {
-                element.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Checkbox::new("svn-remember", form.remember.into()).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Some(form) = this.form.as_mut() {
-                                        form.remember = !form.remember;
-                                    }
-                                    cx.notify();
-                                }),
-                            ),
+            .when_some(self.error.clone(), |form, error| {
+                form.child(Label::new(error).color(Color::Error))
+            })
+            .when(checkout, |form| {
+                form.child(
+                    Button::new("svn-checkout-advanced", t!("Advanced Options"))
+                        .start_icon(
+                            Icon::new(if self.advanced {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(IconSize::Small),
                         )
-                        .child(Label::new(t!("Save password to Keychain")).size(LabelSize::Small)),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.advanced = !this.advanced;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
                 )
             })
-            .when(externals, |element| {
-                element.child(
+            .when(show_externals, |form| {
+                form.child(
                     h_flex()
                         .gap_1()
                         .child(
-                            Checkbox::new("svn-include-externals", form.with_externals.into())
+                            Checkbox::new("svn-include-externals", self.with_externals.into())
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(form) = this.form.as_mut() {
-                                        form.with_externals = !form.with_externals;
-                                    }
+                                    this.with_externals = !this.with_externals;
                                     cx.notify();
                                 })),
                         )
                         .child(Label::new(t!("Include Externals")).size(LabelSize::Small)),
                 )
             })
+            .when_some(self.preview.clone(), |form, preview| {
+                form.child(Label::new(t!("Preview Merge")).size(LabelSize::Small))
+                    .child(
+                        div()
+                            .p_1()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(preview),
+                    )
+            })
             .child(
                 h_flex()
-                    .gap_1()
-                    .flex_wrap()
+                    .gap_2()
+                    .justify_end()
                     .child(
-                        Button::new("svn-submit", t!("Apply"))
-                            .style(ButtonStyle::Filled)
-                            .disabled(disabled)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_form(false, window, cx)
-                            })),
+                        Button::new("svn-cancel-form", t!("Cancel"))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
                     )
-                    .when(merge, |element| {
-                        element.child(
+                    .when(merge, |row| {
+                        row.child(
                             Button::new("svn-preview-merge", t!("Preview Merge"))
                                 .disabled(disabled)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_form(true, window, cx)
-                                })),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.submit(true, window, cx)
+                                    }),
+                                ),
                         )
                     })
-                    .when(self.certificate_recovery().is_some(), |actions| {
-                        actions.child(
-                            Button::new(
-                                "svn-form-verify-certificate",
-                                t!("Verify SVN Server Certificate"),
-                            )
-                            .disabled(disabled)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.certificate(window, cx)),
-                            ),
+                    .child(
+                        Button::new(
+                            "svn-submit",
+                            if checkout {
+                                t!("Continue")
+                            } else {
+                                t!("Apply")
+                            },
                         )
-                    })
-                    .child(cancel),
+                        .style(ButtonStyle::Filled)
+                        .disabled(disabled)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.submit(false, window, cx)),
+                        ),
+                    ),
             )
             .into_any_element()
     }

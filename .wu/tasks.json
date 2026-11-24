@@ -1,0 +1,8 @@
+[
+  {
+    "label": "仅重建 SVN 后台",
+    "command": "./scripts/package-plugin.sh",
+    "args": ["--directory-only", ".build/dev-extension"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

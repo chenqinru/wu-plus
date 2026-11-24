@@ -718,8 +718,9 @@ fn svnserve_authentication_failure_and_password_stdin() {
     let url = format!("svn://127.0.0.1:{port}/trunk");
     let destination = fixture.tmp.path().join("authenticated");
     let wrong = handle("write", json!({"operation":"checkout","url":url,"destination":destination,"auth":{"username":"fixture-user","password":"wrong-password"}}), &Cancellation::default()).unwrap_err();
-    assert_eq!(wrong.kind, "authentication", "{}", wrong.message);
+    assert_eq!(wrong.kind, "authentication_before_write", "{}", wrong.message);
     assert!(!wrong.message.contains("wrong-password"));
+    assert!(!destination.exists());
     request(
         "write",
         json!({"operation":"checkout","url":url,"destination":destination,"auth":{"username":"fixture-user","password":"fixture-password"}}),
@@ -727,6 +728,66 @@ fn svnserve_authentication_failure_and_password_stdin() {
     assert_eq!(
         fs::read_to_string(destination.join("text.txt")).unwrap(),
         "original\nline two\n"
+    );
+
+    let revision = svn(fixture.tmp.path(), &["info", "--show-item", "revision", &fixture.url]);
+    fs::write(destination.join("text.txt"), "authenticated edit\n").unwrap();
+    let commit = |password, expected_url: &str| {
+        handle(
+            "write",
+            json!({
+                "operation":"commit","root":destination,"expected_url":expected_url,
+                "paths":["text.txt"],"message":"authenticated commit",
+                "auth":{"username":"fixture-user","password":password},
+            }),
+            &Cancellation::default(),
+        )
+    };
+    let denied = commit("wrong-password", &url).unwrap_err();
+    assert_eq!(denied.kind, "authentication_before_write", "{}", denied.message);
+    assert_eq!(svn(fixture.tmp.path(), &["info", "--show-item", "revision", &fixture.url]), revision);
+    let moved = commit("fixture-password", &format!("{url}/elsewhere")).unwrap_err();
+    assert_eq!(moved.kind, "invalid_params", "{}", moved.message);
+    assert_eq!(svn(fixture.tmp.path(), &["info", "--show-item", "revision", &fixture.url]), revision);
+    commit("fixture-password", &url).unwrap();
+    assert_eq!(svn(fixture.tmp.path(), &["cat", &format!("{}/trunk/text.txt", fixture.url)]), "authenticated edit\n");
+
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_after_a_commit_started_has_an_uncertain_outcome() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Repos::new();
+    let server = fixture.tmp.path().join("repository");
+    let hook = server.join("hooks/post-commit");
+    let marker = server.join("conf/commit-started");
+    fs::write(&hook, "#!/bin/sh\n: > \"$1/conf/commit-started\"\nexec sleep 30\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(fixture.a.join("text.txt"), "committed before disconnect\n").unwrap();
+
+    let cancellation = Cancellation::default();
+    let error = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            handle(
+                "write",
+                json!({"operation":"commit","root":fixture.a,"paths":["text.txt"],"message":"cancel during hook"}),
+                &cancellation,
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !marker.exists() && !worker.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        cancellation.cancel();
+        assert!(marker.exists(), "the post-commit hook did not start");
+        worker.join().unwrap().unwrap_err()
+    });
+    assert_eq!(error.kind, "uncertain", "{}", error.message);
+    assert_eq!(
+        svn(fixture.tmp.path(), &["cat", &format!("{}/trunk/text.txt", fixture.url)]),
+        "committed before disconnect\n"
     );
 }
 

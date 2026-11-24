@@ -2,20 +2,18 @@ use super::*;
 use ui::ListItemSpacing;
 
 #[derive(Deserialize)]
-struct Target {
+pub(super) struct Target {
     path: String,
     url: String,
 }
 
 #[derive(Deserialize)]
-struct Targets {
-    targets: Vec<Target>,
-    warning: Option<String>,
+pub(super) struct Targets {
+    pub(super) targets: Vec<Target>,
 }
 
 pub(super) struct BranchPicker {
     picker: Entity<picker::Picker<Delegate>>,
-    request: Option<(Arc<rpc::Client>, u64, Task<()>)>,
 }
 
 struct Delegate {
@@ -26,88 +24,35 @@ struct Delegate {
     targets: Vec<Target>,
     matches: Vec<usize>,
     selected: usize,
-    loading: bool,
-    failed: bool,
 }
 
 impl BranchPicker {
     pub(super) fn new(
         panel: WeakEntity<SvnPanel>,
         copy: Copy,
-        client: Arc<rpc::Client>,
-        params: Value,
+        targets: Vec<Target>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let root = copy.root;
         let delegate = Delegate {
             parent: cx.weak_entity(),
-            panel: panel.clone(),
-            root: root.clone(),
-            current_url: copy.url.clone(),
-            targets: Vec::new(),
-            matches: Vec::new(),
+            panel,
+            root: copy.root,
+            current_url: copy.url,
+            matches: (0..targets.len()).collect(),
+            targets,
             selected: 0,
-            loading: true,
-            failed: false,
         };
         let picker = cx.new(|cx| {
             picker::Picker::uniform_list(delegate, window, cx)
                 .initial_width(rems(20.))
                 .show_scrollbar(true)
         });
-        let id = client.next_id();
-        let load = cx.background_spawn({
-            let client = client.clone();
-            async move {
-                client.request(id, "read", params).await.and_then(|value| {
-                    serde_json::from_value::<Targets>(value).map_err(decode_error)
-                })
-            }
-        });
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let result = load.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.request = None;
-                let targets = match result {
-                    Ok(result) => {
-                        if let Some(warning) = result.warning {
-                            let _ =
-                                panel.update(cx, |panel, cx| panel.show_status(warning, true, cx));
-                        }
-                        Some(result.targets)
-                    }
-                    Err(error) => {
-                        let _ = panel.update(cx, |panel, cx| {
-                            if panel.selected_root.as_ref() == Some(&root) {
-                                panel.set_error(error, Some(copy.url), cx);
-                            }
-                        });
-                        None
-                    }
-                };
-                this.picker.update(cx, |picker, cx| {
-                    picker.delegate.loading = false;
-                    picker.delegate.failed = targets.is_none();
-                    picker.delegate.targets = targets.unwrap_or_default();
-                    picker.update_matches(picker.query(cx), window, cx);
-                });
-            });
-        });
-        Self {
-            picker,
-            request: Some((client, id, task)),
-        }
+        Self { picker }
     }
 }
 
-impl Drop for BranchPicker {
-    fn drop(&mut self) {
-        if let Some((client, id, _)) = &self.request {
-            client.cancel(*id);
-        }
-    }
-}
+impl workspace::ModalView for BranchPicker {}
 
 impl EventEmitter<gpui::DismissEvent> for BranchPicker {}
 
@@ -118,8 +63,8 @@ impl Focusable for BranchPicker {
 }
 
 impl Render for BranchPicker {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.picker.clone()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().elevation_3(cx).child(self.picker.clone())
     }
 }
 
@@ -157,13 +102,7 @@ impl picker::PickerDelegate for Delegate {
     }
 
     fn no_matches_text(&self, _: &mut Window, _: &mut App) -> Option<SharedString> {
-        Some(if self.loading {
-            t!("Loading")
-        } else if self.failed {
-            t!("Error loading: {error}", error = t!("Branches"))
-        } else {
-            t!("No Results")
-        })
+        Some(t!("No Results"))
     }
 
     fn update_matches(

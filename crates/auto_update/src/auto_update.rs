@@ -6,6 +6,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, Global, PromptButton,
     Task, TaskExt, Window, actions,
 };
+use http_client::http::{StatusCode, header::RETRY_AFTER};
 use http_client::{HttpClient, HttpClientWithUrl};
 use i18n::t;
 use paths::remote_servers_dir;
@@ -235,6 +236,7 @@ struct ReleaseAsset {
 }
 
 const WU_PLUS_RELEASES_API_URL: &str = "https://api.github.com/repos/chenqinru/wu-plus/releases";
+const WU_PLUS_RELEASES_URL: &str = "https://github.com/chenqinru/wu-plus/releases";
 const WU_PLUS_TAG_PREFIX: &str = "wu-plus-v";
 
 #[derive(Deserialize)]
@@ -259,6 +261,68 @@ fn github_asset_name(asset: &str, os: &str, arch: &str) -> Result<String> {
         ("wu-remote-server", _) => Ok(format!("wu-remote-server-{os}-{arch}.gz")),
         _ => anyhow::bail!("no release asset for {asset} on {os}"),
     }
+}
+
+async fn read_release_metadata(client: &HttpClientWithUrl, url: &str) -> Result<String> {
+    const MAX_METADATA_BYTES: u64 = 64 * 1024;
+
+    let mut response = client.get(url, Default::default(), true).await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch release metadata from {url}: {}",
+        response.status()
+    );
+    let mut metadata = String::new();
+    response
+        .body_mut()
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_string(&mut metadata)
+        .await?;
+    anyhow::ensure!(
+        metadata.len() as u64 <= MAX_METADATA_BYTES,
+        "release metadata is too large: {url}"
+    );
+    Ok(metadata)
+}
+
+async fn get_release_asset_from_checksums(
+    client: &HttpClientWithUrl,
+    version: Option<WuPlusVersion>,
+    asset_name: &str,
+) -> Result<ReleaseAsset> {
+    let version = match version {
+        Some(version) => version,
+        None => {
+            let url = format!("{WU_PLUS_RELEASES_URL}/latest/download/version.txt");
+            read_release_metadata(client, &url)
+                .await?
+                .trim()
+                .parse()
+                .context("invalid Wu Plus release version in version.txt")?
+        }
+    };
+    // Pin both the checksum and the download so a new release cannot change one independently.
+    let release_url = format!("{WU_PLUS_RELEASES_URL}/download/{WU_PLUS_TAG_PREFIX}{version}");
+    let checksums = read_release_metadata(client, &format!("{release_url}/SHA256SUMS")).await?;
+    let mut matches = checksums.lines().filter_map(|line| {
+        let (digest, name) = line.split_once([' ', '\t'])?;
+        let name = name.trim_start().trim_start_matches('*');
+        (name == asset_name).then_some(digest)
+    });
+    let digest = matches
+        .next()
+        .with_context(|| format!("release {version} has no checksum for {asset_name}"))?;
+    anyhow::ensure!(
+        digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && matches.next().is_none(),
+        "release {version} has an invalid checksum for {asset_name}"
+    );
+    Ok(ReleaseAsset {
+        version,
+        url: format!("{release_url}/{asset_name}"),
+        digest: Some(digest.to_owned()),
+    })
 }
 
 struct MacOsUnmounter<'a> {
@@ -742,9 +806,9 @@ impl AutoUpdater {
         let http_client = client.http_client();
 
         let asset_name = github_asset_name(asset, os, arch)?;
+        let version = version.as_ref().map(WuPlusVersion::from);
         let url = match version {
             Some(version) => {
-                let version = WuPlusVersion::from(&version);
                 format!("{WU_PLUS_RELEASES_API_URL}/tags/{WU_PLUS_TAG_PREFIX}{version}")
             }
             None => format!("{WU_PLUS_RELEASES_API_URL}/latest"),
@@ -753,11 +817,30 @@ impl AutoUpdater {
         let mut response = http_client
             .get(url.as_str(), Default::default(), true)
             .await?;
+        let status = response.status();
+        let rate_limit_headers = response.headers().contains_key(RETRY_AFTER)
+            || response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .is_some_and(|remaining| remaining == "0");
         let mut body = Vec::new();
         response.body_mut().read_to_end(&mut body).await?;
 
+        if status == StatusCode::TOO_MANY_REQUESTS
+            || (status == StatusCode::FORBIDDEN
+                && (rate_limit_headers
+                    || String::from_utf8_lossy(&body)
+                        .to_ascii_lowercase()
+                        .contains("rate limit")))
+        {
+            log::info!("GitHub release API rate limited; checking published release metadata");
+            return get_release_asset_from_checksums(&http_client, version, &asset_name)
+                .await
+                .context("GitHub release API rate limited and release metadata fallback failed");
+        }
+
         anyhow::ensure!(
-            response.status().is_success(),
+            status.is_success(),
             "failed to fetch release: {:?}",
             String::from_utf8_lossy(&body),
         );
@@ -1475,11 +1558,12 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_auto_update_downloads(cx: &mut TestAppContext) {
+    async fn test_auto_update_downloads_when_github_rate_limits(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
         let installed_version = WuPlusVersion::new(0, 100, 0, 9);
         let update_version = WuPlusVersion::new(0, 100, 0, 10);
         let release_available = Arc::new(AtomicBool::new(false));
+        let corrupted_download = Arc::new(AtomicBool::new(false));
         let payload = "<fake-wu-plus-update>";
         let temporary = tempdir().unwrap();
         let destination = temporary.path().join("wu-plus");
@@ -1494,18 +1578,21 @@ mod tests {
                 Ok(Some(destination.clone()))
             })));
             let release_available = release_available.clone();
+            let corrupted_download = corrupted_download.clone();
             let client = Client::new(FakeHttpClient::create(move |request| {
                 let available = release_available.load(atomic::Ordering::Relaxed);
+                let corrupt = corrupted_download.load(atomic::Ordering::Relaxed);
                 async move {
                     let body = match request.uri().path() {
+                        "/repos/chenqinru/wu-plus/releases/latest" if available => {
+                            return Ok(Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .header("x-ratelimit-remaining", "0")
+                                .body("API rate limit exceeded".into())?);
+                        }
                         "/repos/chenqinru/wu-plus/releases/latest" => {
-                            let tag = if available {
-                                "wu-plus-v0.100.0.10"
-                            } else {
-                                "wu-plus-v0.100.0.9"
-                            };
                             serde_json::json!({
-                                "tag_name": tag,
+                                "tag_name": "wu-plus-v0.100.0.9",
                                 "assets": [{
                                     "name": github_asset_name("zed", OS, ARCH)?,
                                     "browser_download_url": "https://test.example/new-download",
@@ -1524,7 +1611,14 @@ mod tests {
                             })
                             .to_string()
                         }
-                        "/new-download" => payload.to_owned(),
+                        "/chenqinru/wu-plus/releases/latest/download/version.txt" =>
+                            "0.100.0.10\n".to_owned(),
+                        "/chenqinru/wu-plus/releases/download/wu-plus-v0.100.0.10/SHA256SUMS" =>
+                            format!("{:x}  {}\n", Sha256::digest(payload.as_bytes()), github_asset_name("zed", OS, ARCH)?),
+                        path if path == format!(
+                            "/chenqinru/wu-plus/releases/download/wu-plus-v0.100.0.10/{}",
+                            github_asset_name("zed", OS, ARCH)?,
+                        ) => if corrupt { "corrupted payload".to_owned() } else { payload.to_owned() },
                         _ => return Ok(Response::builder().status(404).body("".into())?),
                     };
                     Ok(Response::builder().status(200).body(body.into())?)
@@ -1557,6 +1651,14 @@ mod tests {
         assert!(!destination.exists());
 
         release_available.store(true, atomic::Ordering::Relaxed);
+        corrupted_download.store(true, atomic::Ordering::Relaxed);
+        let error = AutoUpdater::update(auto_updater.clone(), &mut cx.to_async())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("failed SHA-256 verification"));
+        assert!(!destination.exists());
+
+        corrupted_download.store(false, atomic::Ordering::Relaxed);
         AutoUpdater::update(auto_updater.clone(), &mut cx.to_async())
             .await
             .unwrap();

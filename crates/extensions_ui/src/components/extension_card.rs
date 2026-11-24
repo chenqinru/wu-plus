@@ -8,6 +8,9 @@ use i18n::{n, t};
 use num_format::{Locale, ToFormattedString};
 use release_channel::ReleaseChannel;
 use ui::{Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*};
+use wu_actions::{OpenSettingsAt, OpenSettingsAtTarget};
+
+use crate::SettingsExtension;
 
 type ContextMenuBuilder = Box<
     dyn Fn(Arc<str>, SharedString, &mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static,
@@ -65,7 +68,7 @@ impl ExtensionStatus {
 struct ExtensionCardDetails {
     id: Arc<str>,
     name: SharedString,
-    version: Arc<str>,
+    version: Option<Arc<str>>,
     description: Option<SharedString>,
     authors: SharedString,
     repository_url: Option<SharedString>,
@@ -76,6 +79,7 @@ struct ExtensionCardDetails {
 
 #[derive(Clone)]
 enum ExtensionCardSource {
+    Settings,
     Dev,
     Remote {
         status: ExtensionStatus,
@@ -97,7 +101,7 @@ impl ExtensionCardSource {
     fn download_count(&self) -> Option<u64> {
         match self {
             Self::Remote { download_count, .. } => Some(*download_count),
-            Self::Dev => None,
+            Self::Settings | Self::Dev => None,
         }
     }
 
@@ -124,6 +128,34 @@ pub struct ExtensionCard {
 }
 
 impl ExtensionCard {
+    pub(crate) fn for_settings(extension: SettingsExtension) -> Self {
+        let settings = Button::new((ElementId::from(extension.id), "settings"), t!("Settings"))
+            .on_click(move |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(OpenSettingsAt {
+                        path: extension.settings_path.into(),
+                        target: Some(OpenSettingsAtTarget::User),
+                    }),
+                    cx,
+                );
+            });
+        Self {
+            details: ExtensionCardDetails {
+                id: extension.id.into(),
+                name: extension.name.into(),
+                version: None,
+                description: Some(i18n::translate(extension.description)),
+                authors: extension.authors.into(),
+                repository_url: None,
+                repository_icon: IconName::Link,
+                provided_features: Vec::new(),
+                source: ExtensionCardSource::Settings,
+            },
+            actions: [None, None, Some(settings)],
+            context_menu: None,
+        }
+    }
+
     pub fn for_dev(extension: Arc<ExtensionManifest>, cx: &App) -> Self {
         let extension_store = ExtensionStore::global(cx).read(cx);
         let status = extension_status(&extension.id, extension_store);
@@ -143,7 +175,7 @@ impl ExtensionCard {
         let details = ExtensionCardDetails {
             id: extension.id.clone(),
             name: extension.name.clone().into(),
-            version: extension.version.clone(),
+            version: Some(extension.version.clone()),
             description: extension.description.clone().map(Into::into),
             authors: extension.authors.join(", ").into(),
             repository_url: extension.repository.clone().map(Into::into),
@@ -168,7 +200,7 @@ impl ExtensionCard {
         let details = ExtensionCardDetails {
             id: extension.id.clone(),
             name: extension.manifest.name.clone().into(),
-            version: extension.manifest.version.clone(),
+            version: Some(extension.manifest.version.clone()),
             description: extension.manifest.description.clone().map(Into::into),
             authors: extension.manifest.authors.join(", ").into(),
             repository_url: Some(extension.manifest.repository.clone().into()),
@@ -553,7 +585,9 @@ impl RenderOnce for ExtensionCard {
             provided_features,
             source,
         } = details;
-        let installed_version = source.installed_version(&version);
+        let installed_version = version
+            .as_ref()
+            .and_then(|version| source.installed_version(version));
         let download_count = source.download_count();
         let is_dev = source.is_dev();
         let is_overridden = source.is_overridden();
@@ -585,15 +619,15 @@ impl RenderOnce for ExtensionCard {
                                 .whitespace_nowrap()
                                 .gap_2()
                                 .child(Headline::new(name).size(HeadlineSize::Small))
-                                .child(
+                                .children(version.map(|version| {
                                     Headline::new(if is_dev {
                                         t!("v{version} (dev)", version = version).to_string()
                                     } else {
                                         format!("v{version}")
                                     })
                                     .size(HeadlineSize::XSmall)
-                                    .color(Color::Muted),
-                                )
+                                    .color(Color::Muted)
+                                }))
                                 .children(installed_version.map(|installed_version| {
                                     Headline::new(t!(
                                         "(v{installed_version} installed)",

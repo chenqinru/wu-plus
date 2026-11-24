@@ -104,7 +104,30 @@ fn update_rebuild_dev_extension_visibility(store: &Entity<ExtensionStore>, cx: &
     });
 }
 
-pub fn init(cx: &mut App) {
+#[derive(Clone, Copy)]
+pub struct SettingsExtension {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub search_alias: &'static str,
+    pub description: &'static str,
+    pub authors: &'static str,
+    pub settings_path: &'static str,
+    pub is_available: fn(&ExtensionStore, &App) -> bool,
+}
+
+impl SettingsExtension {
+    fn matches_query(self, query: &str) -> bool {
+        let query = query.trim().to_ascii_lowercase();
+        if let Some(id) = query.strip_prefix("id:") {
+            return self.id == id.trim();
+        }
+        self.name.to_ascii_lowercase().contains(&query)
+            || self.search_alias.to_ascii_lowercase().contains(&query)
+            || self.id == query
+    }
+}
+
+pub fn init(cx: &mut App, settings_extension: Option<SettingsExtension>) {
     let store = ExtensionStore::global(cx);
     update_rebuild_dev_extension_visibility(&store, cx);
     cx.observe(&store, |store, cx| {
@@ -156,6 +179,7 @@ pub fn init(cx: &mut App) {
                             workspace,
                             provides_filter,
                             action.id.as_deref(),
+                            settings_extension,
                             window,
                             cx,
                         );
@@ -372,6 +396,7 @@ pub struct ExtensionsPage {
     is_fetching_extensions: bool,
     fetch_failed: bool,
     filter: ExtensionFilter,
+    settings_extension: Option<SettingsExtension>,
     remote_extension_entries: Vec<ExtensionMetadata>,
     dev_extension_entries: Vec<Arc<ExtensionManifest>>,
     filtered_remote_extension_indices: Vec<usize>,
@@ -389,6 +414,7 @@ impl ExtensionsPage {
         workspace: &Workspace,
         provides_filter: Option<ExtensionProvides>,
         focus_extension_id: Option<&str>,
+        settings_extension: Option<SettingsExtension>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
@@ -436,6 +462,7 @@ impl ExtensionsPage {
                 is_fetching_extensions: false,
                 fetch_failed: false,
                 filter: ExtensionFilter::All,
+                settings_extension,
                 dev_extension_entries: Vec::new(),
                 filtered_remote_extension_indices: Vec::new(),
                 filtered_dev_extension_indices: Vec::new(),
@@ -510,11 +537,13 @@ impl ExtensionsPage {
     }
 
     fn filter_extension_entries(&mut self, cx: &mut Context<Self>) {
+        let settings_extension_id = self.settings_extension.map(|extension| extension.id);
         self.filtered_remote_extension_indices.clear();
         self.filtered_remote_extension_indices.extend(
             self.remote_extension_entries
                 .iter()
                 .enumerate()
+                .filter(|(_, extension)| Some(extension.id.as_ref()) != settings_extension_id)
                 .filter(|(_, extension)| {
                     if self.filter == ExtensionFilter::All {
                         return true;
@@ -539,6 +568,7 @@ impl ExtensionsPage {
             self.dev_extension_entries
                 .iter()
                 .enumerate()
+                .filter(|(_, extension)| Some(extension.id.as_ref()) != settings_extension_id)
                 .filter(|(_, manifest)| match self.provides_filter {
                     Some(provides) => manifest.provides().contains(&provides),
                     None => true,
@@ -650,7 +680,7 @@ impl ExtensionsPage {
     fn render_extensions(
         &mut self,
         range: Range<usize>,
-        _: &mut Window,
+        settings_extension: Option<SettingsExtension>,
         cx: &mut Context<Self>,
     ) -> Vec<ExtensionCard> {
         let dev_extension_entries_len = if self.filter.include_dev_extensions() {
@@ -659,7 +689,13 @@ impl ExtensionsPage {
             0
         };
         range
-            .map(|ix| {
+            .map(|mut ix| {
+                if let Some(extension) = settings_extension {
+                    if ix == 0 {
+                        return ExtensionCard::for_settings(extension);
+                    }
+                    ix -= 1;
+                }
                 if ix < dev_extension_entries_len {
                     let dev_ix = self.filtered_dev_extension_indices[ix];
                     let extension = &self.dev_extension_entries[dev_ix];
@@ -681,6 +717,22 @@ impl ExtensionsPage {
                 }
             })
             .collect()
+    }
+
+    fn visible_settings_extension(&self, cx: &mut App) -> Option<SettingsExtension> {
+        let extension = self.settings_extension?;
+        if !matches!(
+            self.filter,
+            ExtensionFilter::All | ExtensionFilter::Installed
+        ) || self.provides_filter.is_some()
+            || self
+                .search_query(cx)
+                .is_some_and(|query| !extension.matches_query(&query))
+        {
+            return None;
+        }
+        let store = ExtensionStore::global(cx);
+        (extension.is_available)(store.read(cx), cx).then_some(extension)
     }
 
     fn render_remote_extension(
@@ -1372,7 +1424,9 @@ impl Render for ExtensionsPage {
             )
             .child(self.render_feature_upsells(cx))
             .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
-                let mut count = self.filtered_remote_extension_indices.len();
+                let settings_extension = self.visible_settings_extension(cx);
+                let mut count = self.filtered_remote_extension_indices.len()
+                    + usize::from(settings_extension.is_some());
                 if self.filter.include_dev_extensions() {
                     count += self.filtered_dev_extension_indices.len();
                 }
@@ -1382,10 +1436,16 @@ impl Render for ExtensionsPage {
                 } else {
                     let scroll_handle = &self.list;
                     this.child(
-                        uniform_list("entries", count, cx.processor(Self::render_extensions))
-                            .flex_grow_1()
-                            .pb_4()
-                            .track_scroll(scroll_handle),
+                        uniform_list(
+                            "entries",
+                            count,
+                            cx.processor(move |this, range, _, cx| {
+                                this.render_extensions(range, settings_extension, cx)
+                            }),
+                        )
+                        .flex_grow_1()
+                        .pb_4()
+                        .track_scroll(scroll_handle),
                     )
                     .vertical_scrollbar_for(scroll_handle, window, cx)
                     .into_any_element()

@@ -173,6 +173,14 @@ actions!(
     ]
 );
 
+pub(crate) fn init_extensions(cx: &mut App) {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let settings_extension = Some(svn_panel::SETTINGS_EXTENSION);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let settings_extension = None;
+    extensions_ui::init(cx, settings_extension);
+}
+
 pub fn init(cx: &mut App) {
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());

@@ -9,7 +9,7 @@ use gpui::{
     CursorStyle, DefiniteLength, Entity, Focusable as _, Hitbox, HitboxBehavior, Hsla, IntoElement,
     Length, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
     ShapedLine, SharedString, Styled, TextAlign, Window, WindowBackgroundAppearance, div, fill,
-    linear_color_stop, linear_gradient, point, px, size,
+    point, px, size,
 };
 use i18n::t;
 use language::language_settings::ShowWhitespaceSetting;
@@ -160,41 +160,21 @@ impl EditorElement {
             latest_selection_anchors,
         );
 
-        let editor_bg_color = cx.theme().colors().editor_background;
-
         let selected = selected_buffer_ids.contains(&excerpt.buffer_id());
 
         let available_width = hitbox.bounds.size.width - right_margin;
 
-        let mut header = v_flex()
-            .w_full()
-            .relative()
-            .child(
-                div()
-                    .w(available_width)
-                    .h(FILE_HEADER_HEIGHT as f32 * line_height)
-                    .bg(linear_gradient(
-                        0.,
-                        linear_color_stop(editor_bg_color.opacity(0.), 0.),
-                        linear_color_stop(editor_bg_color, 0.6),
-                    ))
-                    .absolute()
-                    .top_0(),
-            )
-            .child(
-                render_buffer_header(
-                    &self.editor,
-                    excerpt,
-                    false,
-                    selected,
-                    true,
-                    jump_data,
-                    window,
-                    cx,
-                )
-                .into_any_element(),
-            )
-            .into_any_element();
+        let mut header = render_buffer_header(
+            &self.editor,
+            excerpt,
+            false,
+            selected,
+            true,
+            jump_data,
+            window,
+            cx,
+        )
+        .into_any_element();
 
         let mut origin = hitbox.origin;
         // Move floating header up to avoid colliding with the next buffer header.
@@ -696,12 +676,8 @@ pub(crate) fn render_buffer_header(
     };
     let focus_handle = editor_read.focus_handle(cx);
     let colors = cx.theme().colors();
-    // On transparent windows, only render an opaque `editor_subheader_background` so it masks
-    // the editor content beneath it without creating a darker bar. Sticky shadows still require
-    // an opaque window to avoid rendering as a halo.
     let opaque_window =
         cx.theme().window_background_appearance() == WindowBackgroundAppearance::Opaque;
-    let show_header_background = opaque_window || colors.editor_subheader_background.is_opaque();
 
     let show_open_file_button =
         can_open_excerpts && relative_path.is_some() && (is_selected || header_hovered);
@@ -719,6 +695,14 @@ pub(crate) fn render_buffer_header(
         .p(BUFFER_HEADER_PADDING)
         .w_full()
         .h(FILE_HEADER_HEIGHT as f32 * window.line_height())
+        .when(is_sticky, |header| {
+            // The backing must mask the underlying text and gutter even in translucent themes.
+            let window_background = Hsla {
+                a: 1.,
+                ..colors.background
+            };
+            header.bg(window_background.blend(colors.editor_background))
+        })
         .child(
             h_flex()
                 .group("buffer-header-group")
@@ -739,9 +723,7 @@ pub(crate) fn render_buffer_header(
                     border.border_color(border_color)
                 })
                 .when(is_sticky && opaque_window, |s| s.shadow_md())
-                .when(show_header_background, |s| {
-                    s.bg(colors.editor_subheader_background)
-                })
+                .bg(colors.editor_subheader_background)
                 .hover(|s| s.bg(colors.element_hover))
                 .map(|header| {
                     let editor = editor.clone();

@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 #[derive(Deserialize)]
 pub(super) struct Write {
     root: Option<PathBuf>,
+    expected_url: Option<String>,
     #[serde(flatten)]
     operation: Operation,
     #[serde(default)]
@@ -257,6 +258,52 @@ fn ensure_file_external_excluded(
     Ok(())
 }
 
+fn check_write_authentication(
+    target: OsString,
+    revision: Option<&str>,
+    auth: &Auth,
+    realm: &str,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    if target
+        .to_str()
+        .is_some_and(|target| target.starts_with("file://"))
+    {
+        return Ok(());
+    }
+    let args = with_revision(flags(&["info", "--xml", "--depth", "empty"]), revision)?;
+    match command(None, args, vec![target], auth, Some(realm), cancellation) {
+        Ok(_) => Ok(()),
+        Err(mut error) if error.kind == "authentication" => {
+            error.kind = "authentication_before_write";
+            Err(error)
+        }
+        // The write can have different path permissions or use a different peg revision.
+        Err(error) if error.kind == "svn" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_outcome(error: RpcError) -> RpcError {
+    let interrupted = error.kind == "svn"
+        && ["E170013", "E175002", "E205011", "E730054", "E000104"]
+            .iter()
+            .any(|code| error.message.contains(code));
+    if matches!(
+        error.kind,
+        "timeout" | "cancelled" | "io" | "authentication" | "binary" | "output_limit"
+    ) || interrupted {
+        return RpcError::new(
+            "uncertain",
+            format!(
+                "{} Refresh and verify the repository before retrying.",
+                error.message
+            ),
+        );
+    }
+    error
+}
+
 fn checkout(
     address: String,
     destination: PathBuf,
@@ -291,6 +338,7 @@ fn checkout(
         args.push("--ignore-externals".into());
     }
     let args = with_revision(args, rev)?;
+    check_write_authentication(peg(address), rev, auth, address, cancellation)?;
     let result = command(
         Some(&parent),
         args,
@@ -298,7 +346,8 @@ fn checkout(
         auth,
         Some(address),
         cancellation,
-    )?;
+    )
+    .map_err(write_outcome)?;
     let warning = auth
         .remember(Some(address))
         .and_then(|_| {
@@ -335,13 +384,15 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
         }
         action => action,
     };
-    let copy = root_info(
-        &params
-            .root
-            .ok_or_else(|| invalid("Select an SVN working copy."))?,
-        cancellation,
-    )?;
-    let _lock = write_lock(&copy.root, cancellation)?;
+    let root = params
+        .root
+        .ok_or_else(|| invalid("Select an SVN working copy."))?;
+    if !root.is_absolute() {
+        return Err(invalid("An absolute SVN working copy root is required."));
+    }
+    let _lock = write_lock(&root, cancellation)?;
+    let copy = root_info(&root, cancellation)?;
+    ensure_expected_url(&copy, params.expected_url.as_deref())?;
     let mut argument_file = None;
     let (args, targets, touches_server) = match action {
         Operation::Update {
@@ -600,6 +651,32 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
     }
     let local = Auth::default();
     let effective_auth = if touches_server { &auth } else { &local };
+    let writes_to_server = touches_server && !args.iter().any(|argument| argument == "--dry-run");
+    if writes_to_server {
+        let target = if matches!(
+            args.first().and_then(|arg| arg.to_str()),
+            Some("copy" | "switch" | "merge")
+        ) {
+            targets.first().cloned().unwrap_or_else(|| peg(&copy.url))
+        } else {
+            peg(&copy.url)
+        };
+        let revision = args
+            .windows(2)
+            .find_map(|pair| {
+                (pair[0] == "--revision")
+                    .then(|| pair[1].to_str())
+                    .flatten()
+            })
+            .filter(|revision| !revision.contains(':'));
+        check_write_authentication(
+            target,
+            revision,
+            effective_auth,
+            &copy.repository_url,
+            cancellation,
+        )?;
+    }
     let output = command(
         Some(&copy.root),
         args,
@@ -617,15 +694,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
                 .map(|error| error.message);
             Ok(json!({"text":content,"warning":warning}))
         }
-        Err(error) if touches_server && matches!(error.kind, "timeout" | "cancelled" | "io") => {
-            Err(RpcError::new(
-                "uncertain",
-                format!(
-                    "{} Refresh and verify the repository before retrying.",
-                    error.message
-                ),
-            ))
-        }
+        Err(error) if writes_to_server => Err(write_outcome(error)),
         Err(error) => Err(error),
     }
 }

@@ -340,6 +340,13 @@ fn root_info(root: &Path, cancellation: &Cancellation) -> Result<WorkingCopy> {
     Ok(copy)
 }
 
+fn ensure_expected_url(copy: &WorkingCopy, expected: Option<&str>) -> Result<()> {
+    if expected.is_some_and(|expected| expected != copy.url) {
+        return Err(invalid("The SVN working copy URL changed. Refresh before retrying."));
+    }
+    Ok(())
+}
+
 fn file_target(root: &Path, path: &str) -> Result<PathBuf> {
     if path == "." {
         return Ok(root.to_path_buf());

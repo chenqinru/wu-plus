@@ -1,3 +1,4 @@
+mod authentication;
 mod branch_picker;
 mod changes_view;
 mod commit_message;
@@ -213,6 +214,17 @@ enum Provider {
 }
 
 impl Provider {
+    fn discover(store: Option<&ExtensionStore>, cx: &App) -> Option<Self> {
+        if let Some(executable) = rpc::bundled_executable(cx) {
+            return Some(Self::Bundled(executable));
+        }
+        let store = store?;
+        store
+            .dev_extensions()
+            .any(|extension| extension.id.as_ref() == EXTENSION_ID)
+            .then(|| Self::Development(store.installed_dir.join(EXTENSION_ID)))
+    }
+
     fn executable(&self) -> Result<PathBuf, rpc::Error> {
         match self {
             Self::Bundled(executable) => Ok(executable.clone()),
@@ -222,6 +234,19 @@ impl Provider {
 }
 
 const EXTENSION_ID: &str = "wu-plus-subversion";
+
+pub(super) const SETTINGS_EXTENSION: extensions_ui::SettingsExtension =
+    extensions_ui::SettingsExtension {
+        id: EXTENSION_ID,
+        name: "Subversion",
+        search_alias: "SVN",
+        description: i18n::n!(
+            "Subversion working copies, changes, history, and repository operations."
+        ),
+        authors: "Wu Plus contributors",
+        settings_path: "svn.enabled",
+        is_available: |store, cx| Provider::discover(Some(store), cx).is_some(),
+    };
 
 fn svn_path_string(path: &Path) -> Option<String> {
     let path = path.to_str()?;
@@ -298,6 +323,8 @@ enum Output {
     Checkout,
     Conflict,
     RemoteStatus,
+    BranchPicker,
+    MergePreview,
 }
 
 enum PreviewRequest {
@@ -328,7 +355,7 @@ pub(super) struct SvnPanel {
     position: DockPosition,
     scroll: ScrollHandle,
     repositories_scroll: ScrollHandle,
-    history: history::History,
+    history: history::PanelHistory,
     history_requests: history::Requests,
     commit_editor: Entity<Editor>,
     commit_drafts: BTreeMap<PathBuf, String>,
@@ -364,7 +391,6 @@ pub(super) struct SvnPanel {
     last_output: Option<String>,
     error_kind: Option<String>,
     certificate_target: Option<String>,
-    form: Option<form::Form>,
     _events: Vec<Subscription>,
     refresh: Option<Task<()>>,
     operation: Option<Task<()>>,
@@ -486,7 +512,7 @@ impl SvnPanel {
             position: DockPosition::Left,
             scroll: ScrollHandle::new(),
             repositories_scroll: ScrollHandle::new(),
-            history: history::History::default(),
+            history: history::PanelHistory::default(),
             history_requests: history::Requests::default(),
             commit_editor,
             commit_drafts: BTreeMap::new(),
@@ -522,7 +548,6 @@ impl SvnPanel {
             last_output: None,
             error_kind: None,
             certificate_target: None,
-            form: None,
             _events: subscriptions,
             refresh: None,
             operation: None,
@@ -541,14 +566,7 @@ impl SvnPanel {
         if !self.project.read(cx).is_local() || !ProjectSettings::get_global(cx).svn.enabled {
             return None;
         }
-        if let Some(executable) = rpc::bundled_executable(cx) {
-            return Some(Provider::Bundled(executable));
-        }
-        let store = store?.read(cx);
-        store
-            .dev_extensions()
-            .any(|extension| extension.id.as_ref() == EXTENSION_ID)
-            .then(|| Provider::Development(store.installed_dir.join(EXTENSION_ID)))
+        Provider::discover(store.map(|store| store.read(cx)), cx)
     }
 
     fn sync_provider(
@@ -579,7 +597,6 @@ impl SvnPanel {
         self.deferred_refresh = None;
         self.busy = false;
         self.scanning = false;
-        self.form = None;
         self.credentials.clear();
         self.history_requests.clear();
         self.checkout_root = None;
@@ -588,6 +605,7 @@ impl SvnPanel {
             self.publish_project_statuses(BTreeMap::new(), cx);
         }
         self.set_current(None, window, cx);
+        self.history.clear();
         self.repository_selections.clear();
         self.scan_error = None;
         self.error_kind = None;
@@ -765,6 +783,7 @@ impl SvnPanel {
                                 .collect();
                             this.recheck_editor_locations(&changed_roots, window, cx);
                         }
+                        this.reconcile_repository_history(&repos);
                         this.repos = repos;
                         this.publish_project_statuses(statuses, cx);
                         let contains =
@@ -778,12 +797,11 @@ impl SvnPanel {
                                 .cloned()
                                 .or_else(|| this.repos.first().map(|repo| repo.copy.root.clone()))
                         };
-                        if current != this.selected_root {
+                        let selected_repository_changed = current != this.selected_root;
+                        if selected_repository_changed {
                             this.set_current(current, window, cx);
-                            if this.history.visible && this.selected_root.is_some() {
-                                this.load_history(false, window, cx);
-                            }
                         }
+                        this.preload_history(false, window, cx);
                         this.prune_selection();
                         if this.pending_refresh.is_none()
                             && this.preview_request.is_none()
@@ -872,6 +890,7 @@ impl SvnPanel {
                 self.commit_drafts.insert(previous.clone(), message);
             }
         }
+        self.history.reset_view(self.selected_root.as_deref());
         self.selected_root = root;
         self.reveal_selected_repository();
         let draft = self
@@ -892,9 +911,7 @@ impl SvnPanel {
             .unwrap_or_default();
         self.prune_selection();
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
-        self.history.clear();
         self.last_output = None;
-        self.form = None;
     }
 
     fn switch_repository(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -909,9 +926,8 @@ impl SvnPanel {
         self.set_current(Some(root), window, cx);
         self.error_kind = None;
         self.certificate_target = None;
-        if self.history.visible {
-            self.load_history(false, window, cx);
-        } else if showing_diff {
+        self.preload_history(true, window, cx);
+        if !self.history.visible && showing_diff {
             self.show_worktree_diff(None, window, cx);
         }
         cx.notify();
@@ -972,10 +988,6 @@ impl SvnPanel {
             .remove("background")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let close_form = arguments
-            .remove("close_form")
-            .and_then(|value| value.as_bool())
-            == Some(true);
         let focus_path = arguments
             .get("focus_path")
             .and_then(Value::as_str)
@@ -1000,10 +1012,15 @@ impl SvnPanel {
             },
             _ => PreviewRequest::Diff(id),
         });
-        let form_id = self.form.as_ref().and_then(form::Form::first_field_id);
-        let task = cx.background_spawn(async move { client.request(id, "read", params).await });
         cx.spawn_in(window, async move |panel, cx| {
-            let result = task.await;
+            let result = if background {
+                client.request(id, "read", params).await
+            } else {
+                authentication::request(
+                    &client, id, "read", params, &panel,
+                    |panel| panel.preview_generation == generation, cx,
+                ).await
+            };
             let _ = panel.update_in(cx, |this, window, cx| {
                 if this.preview_generation != generation {
                     return;
@@ -1018,12 +1035,6 @@ impl SvnPanel {
                             *id = None;
                         } else {
                             this.preview_request = None;
-                        }
-                        if close_form && form_id.is_some()
-                            && this.form.as_ref().and_then(form::Form::first_field_id) == form_id
-                        {
-                            this.form = None;
-                            cx.notify();
                         }
                         this.finish(output, root, result, window, cx);
                     }
@@ -1173,10 +1184,7 @@ impl SvnPanel {
     fn needs_credentials(&self) -> bool {
         self.error_kind.as_deref() == Some("authentication")
             && self.repo().is_some()
-            && self
-                .form
-                .as_ref()
-                .is_none_or(|form| form.kind != form::Kind::Checkout)
+
     }
 
     fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1218,6 +1226,9 @@ impl SvnPanel {
 
     fn repository_params(&self, root: &std::path::Path, mut params: Value) -> Value {
         params["root"] = json!(root);
+        if let Some(repo) = self.repos.iter().find(|repo| repo.copy.root == root) {
+            params["expected_url"] = json!(repo.copy.url);
+        }
         if let Some(credentials) = self.credentials.get(root) {
             params["auth"] = json!(credentials);
         }
@@ -1239,6 +1250,7 @@ impl SvnPanel {
             return;
         };
         let checkout = matches!(output, Output::Checkout);
+        let switched = method == "write" && params["operation"].as_str() == Some("switch");
         let history_changed = method == "write"
             && matches!(
                 params["operation"].as_str(),
@@ -1250,7 +1262,7 @@ impl SvnPanel {
             return;
         }
         if !checkout && let Some(root) = &root {
-            params["root"] = json!(root);
+            params = self.repository_params(root, params);
         }
         if method == "write"
             && !checkout
@@ -1268,14 +1280,6 @@ impl SvnPanel {
             );
             cx.notify();
             return;
-        }
-        let credentials = if checkout {
-            None
-        } else {
-            root.as_ref().and_then(|root| self.credentials.get(root))
-        };
-        if let Some(credentials) = credentials {
-            params["auth"] = json!(credentials);
         }
         let certificate_target = params
             .get("url")
@@ -1310,33 +1314,18 @@ impl SvnPanel {
         self.refresh = None;
         self.deferred_refresh = None;
         let revision = self.revision;
-        let close_form = params
-            .as_object_mut()
-            .and_then(|params| params.remove("close_form"))
-            .and_then(|value| value.as_bool())
-            == Some(true);
         let submitted_message = if matches!(output, Output::Commit) {
             params["message"].as_str().map(str::to_owned)
         } else {
             None
         };
-        let checkout_credentials = if checkout {
-            params["auth"]["username"]
-                .as_str()
-                .filter(|name| !name.is_empty())
-                .map(|username| Credentials {
-                    username: username.to_owned(),
-                    password: params["auth"]["password"].as_str().map(str::to_owned),
-                    remember: params["auth"]["remember"].as_bool().unwrap_or(false),
-                })
-        } else {
-            None
-        };
         let id = client.next_id();
         self.operation_id = Some(id);
-        let task = cx.background_spawn(async move { client.request(id, method, params).await });
         self.operation = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
+            let result = authentication::request(
+                &client, id, method, params, &this,
+                |panel| panel.operation_id == Some(id) && !panel.cancellation_requested, cx,
+            ).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if revision != this.revision {
                     return;
@@ -1345,18 +1334,11 @@ impl SvnPanel {
                 this.operation_id = None;
                 match result {
                     Ok(result) => {
-                        if let Some(credentials) = checkout_credentials
-                            && let Some(destination) = result["destination"].as_str()
-                        {
-                            this.history_requests
-                                .invalidate(std::path::Path::new(destination));
-                            this.credentials
-                                .insert(PathBuf::from(destination), credentials);
-                        }
-                        if close_form {
-                            this.form = None;
+                        if checkout && let Some(destination) = result["destination"].as_str() {
+                            this.discard_history_for(Path::new(destination));
                         }
                         if let Some(message) = submitted_message
+                            && this.selected_root == root
                             && this.commit_editor.read(cx).text(cx) == message
                         {
                             this.commit_editor.update(cx, |editor, cx| {
@@ -1364,13 +1346,14 @@ impl SvnPanel {
                             });
                         }
                         if history_changed && let Some(root) = &root {
-                            this.reload_history_for(root, window, cx);
+                            this.invalidate_history_after_write(root, switched, window, cx);
                         }
                         if history_changed {
                             this.refresh_editor_baselines(root.as_deref(), window, cx);
                         }
                         this.finish(output, root, result, window, cx);
                     }
+                    Err(error) if error.kind == "cancelled" => {}
                     Err(error) => {
                         if error.kind == "transport" {
                             this.client = None;
@@ -1404,6 +1387,30 @@ impl SvnPanel {
             Output::Text => {
                 preview::text(self.workspace.clone(), t!("SVN Output"), value, window, cx)
             }
+            Output::MergePreview => {
+                if let Some(workspace) = self.workspace.upgrade()
+                    && let Some(form) = workspace.read(cx).active_modal::<form::Form>(cx)
+                {
+                    form.update(cx, |form, cx| form.show_preview(value, window, cx));
+                }
+            }
+            Output::BranchPicker => match serde_json::from_value::<branch_picker::Targets>(result) {
+                Ok(targets) => {
+                    if let Some(repo) = self.repo().filter(|repo| Some(&repo.copy.root) == root.as_ref()) {
+                        let copy = repo.copy.clone();
+                        let workspace = self.workspace.clone();
+                        let panel = cx.weak_entity();
+                        window.defer(cx, move |window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_modal(window, cx, |window, cx| {
+                                    branch_picker::BranchPicker::new(panel, copy, targets.targets, window, cx)
+                                });
+                            }).log_err();
+                        });
+                    }
+                }
+                Err(error) => self.set_error(decode_error(error), None, cx),
+            },
             Output::Diff => {
                 let parsed = serde_json::from_value::<preview::DiffResult>(result);
                 let scope = preview::Scope::new(self.preview_generation, cx);
@@ -1536,6 +1543,7 @@ impl SvnPanel {
                         .iter()
                         .filter(|entry| entry.remote_item.is_some() || entry.remote_props.is_some())
                         .count();
+                    self.reconcile_working_copy_history(&copy);
                     if let Some(repo) = self
                         .repos
                         .iter_mut()
@@ -1547,6 +1555,7 @@ impl SvnPanel {
                             error: None,
                         };
                     }
+                    self.preload_history(false, window, cx);
                     self.prune_selection();
                     self.show_status(format!("{} ({changed})", t!("Remote Change")), false, cx);
                 }
@@ -1579,13 +1588,15 @@ impl SvnPanel {
             cx.notify();
             return;
         }
-        let repos = self
+        let requests = self
             .repos
             .iter()
-            .map(|repo| repo.copy.root.clone())
+            .map(|repo| {
+                let root = &repo.copy.root;
+                (root.clone(), self.repository_params(root, json!({"operation":"update"})))
+            })
             .collect::<Vec<_>>();
         // The window task exposes each current request ID to the cancel button.
-        let credentials = self.credentials.clone();
         self.cancel_commit_generation(cx);
         self.busy = true;
         self.cancellation_requested = false;
@@ -1599,7 +1610,9 @@ impl SvnPanel {
         self.operation = Some(cx.spawn_in(window, async move |this, cx| {
             let mut report = Vec::new();
             let mut failure = None;
-            for root in repos {
+            let mut cancelled = false;
+            let mut updated_roots = Vec::new();
+            for (root, params) in requests {
                 let id = client.next_id();
                 let continue_batch = this.update(cx, |this, cx| {
                     if this.revision != revision || this.cancellation_requested { return false; }
@@ -1610,13 +1623,29 @@ impl SvnPanel {
                 if !continue_batch {
                     break;
                 }
-                let mut params = json!({"root":root,"operation":"update"});
-                if let Some(auth) = credentials.get(&root) {
-                    params["auth"] = json!(auth);
-                }
-                match client.request(id, "write", params).await {
-                    Ok(result) => report.push(format!("{}\n{}", root.display(), result["text"].as_str().unwrap_or_default())),
+                match authentication::request(
+                    &client, id, "write", params, &this,
+                    |panel| panel.operation_id == Some(id) && !panel.cancellation_requested, cx,
+                ).await {
+                    Ok(result) => {
+                        report.push(format!(
+                            "{}\n{}",
+                            root.display(),
+                            result["text"].as_str().unwrap_or_default()
+                        ));
+                        updated_roots.push(root);
+                    }
+                    Err(error) if error.kind == "cancelled" => {
+                        cancelled = true;
+                        break;
+                    }
                     Err(error) => {
+                        if error.kind == "transport" {
+                            this.update(cx, |panel, _| {
+                                panel.client = None;
+                                panel.history_requests.clear();
+                            }).log_err();
+                        }
                         failure.get_or_insert_with(|| error.message.clone());
                         report.push(format!("{}\n{}", root.display(), error.message));
                         if matches!(error.kind.as_str(), "uncertain" | "cancelled" | "transport") {
@@ -1629,12 +1658,15 @@ impl SvnPanel {
                 if this.revision != revision { return; }
                 this.busy = false;
                 this.operation_id = None;
+                for root in updated_roots {
+                    this.invalidate_repository_history(&root);
+                }
                 let output = report.join("\n\n");
                 this.last_output = Some(output.clone());
-                let message = if this.cancellation_requested {
-                    t!("Operation was canceled")
-                } else if let Some(error) = &failure {
+                let message = if let Some(error) = &failure {
                     error.clone().into()
+                } else if cancelled || this.cancellation_requested {
+                    t!("Operation was canceled")
                 } else {
                     t!("SVN operation completed.")
                 };
@@ -1736,7 +1768,7 @@ impl Panel for SvnPanel {
         self.enabled
     }
     fn activation_priority(&self) -> u32 {
-        4
+        5
     }
 }
 
@@ -1791,6 +1823,7 @@ impl SvnPanel {
         cx: &mut Context<Self>,
     ) {
         let selected = self.selected_root.clone();
+        let working_copy_url = self.repo().map(|repo| repo.copy.url.clone());
         let answer = window.prompt(
             PromptLevel::Warning,
             title.as_ref(),
@@ -1801,7 +1834,9 @@ impl SvnPanel {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await.ok() == Some(0) {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    if selected == this.selected_root {
+                    if selected == this.selected_root
+                        && this.repo().map(|repo| &repo.copy.url) == working_copy_url.as_ref()
+                    {
                         this.run(method, params, output, window, cx);
                     }
                 });

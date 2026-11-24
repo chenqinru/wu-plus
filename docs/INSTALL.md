@@ -34,7 +34,7 @@ Wu Plus 在 macOS、Windows 和 Linux 的本地工作区自动检测 SVN 工作�
 
 如果 SVN 面板提示缺少兼容版本，安装后点「重试」重新检测。Windows 上若刚修改 PATH，可重启 Wu Plus 以加载新的环境变量。
 
-打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标，也可在命令面板运行「切换 SVN 面板」。用更改面板底部或历史面板顶部的工作副本名称切换仓库。在「设置 → 版本控制 → Subversion（SVN）」关闭「启用 Subversion」可停用 SVN。
+打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标，也可在命令面板运行「切换 SVN 面板」。用更改面板底部或历史面板顶部的工作副本名称切换仓库。在「扩展 → 已安装」找到 **Subversion**，点击「设置」可直接跳到「启用 Subversion」。也可以从「设置 → 版本控制 → Subversion（SVN）」进入。
 
 ## 使用 SVN
 
