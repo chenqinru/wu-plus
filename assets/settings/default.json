@@ -1515,6 +1515,7 @@
   // but cannot edit them. This is useful for generated files or external dependencies.
   "read_only_files": [],
   "svn": {
+    "enabled": true,
     "show_change_markers": true,
     "inline_blame": true,
     "blame_gutter": false,

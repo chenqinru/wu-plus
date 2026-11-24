@@ -665,16 +665,12 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         );
 
         #[cfg(target_os = "macos")]
-        if let Ok(Some(store)) =
-            workspace_handle.read_with(cx, |_, cx| ExtensionStore::try_global(cx))
-        {
-            add_panel_when_ready(
-                svn_panel::SvnPanel::load(workspace_handle.clone(), store, cx.clone()),
-                workspace_handle.clone(),
-                cx.clone(),
-            )
-            .await;
-        }
+        add_panel_when_ready(
+            svn_panel::SvnPanel::load(workspace_handle.clone(), cx.clone()),
+            workspace_handle.clone(),
+            cx.clone(),
+        )
+        .await;
 
         workspace_handle.update(cx, |workspace, cx| {
             workspace.finish_dock_restoration(cx);

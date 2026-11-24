@@ -7151,6 +7151,19 @@ fn version_control_page() -> SettingsPage {
         vec![
             SettingsPageItem::SectionHeader(n!("Subversion (SVN)")),
             SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Enable Subversion"),
+                description: n!("Enable Subversion integration for local workspaces."),
+                field: Box::new(SettingField {
+                    json_path: Some("svn.enabled"),
+                    pick: |content| content.svn.as_ref()?.enabled.as_ref(),
+                    write: |content, value, _| {
+                        content.svn.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: n!("SVN Change Markers"),
                 description: n!("Show SVN changes beside line numbers and on the scrollbar in source files."),
                 field: Box::new(SettingField {

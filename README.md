@@ -1,14 +1,14 @@
 # Wu Plus
 
-Wu Plus 是基于 Wu 的原生编辑器，保留 Git 工作流，并在 macOS 本地工作区提供 Subversion 扩展。你可以在同一个窗口打开多个 SVN 工作副本，查看差异和日志、提交、更新及处理冲突。
+Wu Plus 是基于 Wu 的原生编辑器，保留 Git 工作流，并在 macOS 本地工作区内置 Subversion 支持。你可以在同一个窗口打开多个 SVN 工作副本，查看差异和日志、提交、更新及处理冲突。
 
 ## 安装与使用
 
 Wu Plus 目前处于首发验收阶段，正式安装包发布后可在 [GitHub Releases](https://github.com/chenqinru/wu-plus/releases) 下载。想提前体验，可从候选构建的 **Artifacts** 下载。三平台候选的构建与验收入口见 [开发与发布](docs/MAINTAINING.md#github-actions)。
 
-| 平台 | IDE 候选包 | SVN 扩展 |
+| 平台 | IDE 候选包 | SVN 支持 |
 | --- | --- | --- |
-| macOS Apple Silicon / Intel | 对应架构的 DMG | 支持本地工作区，需单独安装扩展和 SVN 1.14+ |
+| macOS Apple Silicon / Intel | 对应架构的 DMG | 随 App 安装，使用系统 SVN 1.14+ |
 | Linux x86_64 / ARM64 | 对应架构的 `.tar.gz` | 暂未提供 |
 | Windows x86_64 | `.exe` 安装程序 | 暂未提供 |
 
@@ -18,11 +18,10 @@ Wu Plus 目前处于首发验收阶段，正式安装包发布后可在 [GitHub 
 brew install subversion
 ~~~
 
-1. 安装与机器架构匹配的 Wu Plus，下载同一次构建的 Subversion 扩展包。
-2. 把扩展解压到准备长期保留的目录。在 Wu Plus 扩展页选择「安装开发扩展」，选择包含 `extension.toml` 的 `Subversion` 目录。
-3. 打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标。多个工作副本可以在 SVN 面板切换。
+1. 安装与机器架构匹配的 Wu Plus。
+2. 打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标。Wu Plus 会按需启动随包安装的后台，可以在面板中切换多个工作副本。
 
-平台安装命令、扩展卸载、配置迁移和 SVN 操作说明见 [安装与 SVN 使用说明](docs/INSTALL.md)。
+平台安装命令、SVN 设置、配置迁移和操作说明见 [安装与 SVN 使用说明](docs/INSTALL.md)。
 
 ## SVN 工作流
 

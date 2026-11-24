@@ -229,6 +229,7 @@ function sign_app_binaries() {
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
+        /usr/bin/codesign --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/wu-plus-subversion-provider" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/wu/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/wu" -v
         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/wu/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
     elif [[ $self_signed = true ]]; then
@@ -236,6 +237,7 @@ function sign_app_binaries() {
         # Apple's timestamp server and notarization only accept Apple-issued certificates.
         /usr/bin/codesign --force --timestamp=none --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --force --timestamp=none --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
+        /usr/bin/codesign --force --timestamp=none --sign "$IDENTITY" "${app_path}/Contents/MacOS/wu-plus-subversion-provider" -v
         /usr/bin/codesign --force --timestamp=none --entitlements crates/wu/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/wu" -v
         /usr/bin/codesign --force --timestamp=none --entitlements crates/wu/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
         /usr/bin/codesign --verify --deep --strict --verbose=2 "${app_path}"
@@ -256,6 +258,8 @@ function sign_app_binaries() {
 
         codesign --force --deep --entitlements "${app_path}/Contents/Resources/zed.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
     fi
+
+    codesign --verify --deep --strict "$app_path"
 
     bundle_name=$(basename "$app_path")
 
@@ -328,6 +332,12 @@ function sign_binary() {
 
 cp target/${target_triple}/${target_dir}/wu "${app_path}/Contents/MacOS/wu"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+(
+    unset MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD APPLE_NOTARIZATION_KEY \
+        APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID
+    CARGO_BUILD_TARGET="$target_triple" scripts/package-plugin.sh --bundle "$app_path"
+)
+lipo "${app_path}/Contents/MacOS/wu-plus-subversion-provider" -verify_arch "${arch_suffix/aarch64/arm64}"
 
 if [[ "$app_only" == false && "$target_dir" = "release" && -n "${CI:-}${BUNDLE_DSYM:-}" ]]; then
     dsym_path="target/${target_triple}/${target_dir}/Wu.dSYM"

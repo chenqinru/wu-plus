@@ -1,6 +1,6 @@
 # Wu Plus 开发与维护
 
-Wu Plus 直接在 Wu 源码上开发，当前固定的上游标签和提交记录在 `scripts/wu-upstream.json`。宿主和 SVN 后台在同一仓库维护。后台进程可独立编译和测试，宿主从开发扩展列表启动它，并通过标准输入输出上的 JSON-RPC 2.0 进行版本握手、请求和取消。使用同一提交构建的宿主和扩展可以保持协议匹配。
+Wu Plus 直接在 Wu 源码上开发，当前固定的上游标签和提交记录在 `scripts/wu-upstream.json`。宿主和 SVN 后台在同一仓库维护。macOS App 随包安装同一提交构建的 SVN 后台，宿主通过标准输入输出上的 JSON-RPC 2.0 进行版本握手、请求和取消。后台可以独立编译和测试，直接运行宿主二进制调试时仍可使用开发扩展。
 
 ## 本地构建与调试
 
@@ -13,7 +13,7 @@ scripts/wu.sh check
 scripts/wu.sh build
 ~~~
 
-Rust 工具链在 `rust-toolchain.toml` 中固定。`check` 检查当前源码并运行 SVN 集成测试，`build` 构建本地宿主二进制。如需 macOS DMG 和配套扩展，运行 `scripts/wu.sh bundle`。本地和 CI 共用 Wu 原生的 `script/bundle-mac`，产物默认写入 `dist/`，可通过 `WU_PLUS_DIST_DIR` 调整。只需打包 SVN 扩展时可直接运行 `scripts/package-plugin.sh`。
+Rust 工具链在 `rust-toolchain.toml` 中固定。`check` 检查当前源码并运行 SVN 集成测试，`build` 构建本地宿主二进制。如需包含 SVN 后台的 macOS DMG，运行 `scripts/wu.sh bundle`。本地和 CI 共用 Wu 原生的 `script/bundle-mac`，产物默认写入 `dist/`，可通过 `WU_PLUS_DIST_DIR` 调整。只需重建开发扩展时可直接运行 `scripts/package-plugin.sh`。
 
 用 Wu 打开仓库根目录，Apple Silicon 可选「调试 Wu Plus（Apple Silicon / SVN）」。启动前会构建宿主和扩展、准备 CodeLLDB，并用 `.build/dev-profile` 启动独立实例。只调试宿主时，跨平台配置「Debug Wu Plus (CodeLLDB)」沿用 Wu 原生的 Cargo 构建与调试器查找方式。 [上游开发文档](https://zed.dev/docs/development)
 
@@ -27,17 +27,17 @@ python3 scripts/demo-workspace.py
 
 SVN 测试使用临时仓库和本机 `svnserve`，覆盖提交范围、更新、冲突、认证和取消。烟雾脚本生成两个 SVN 工作副本和一个 Git 仓库。完整演示工作区包含三个独立 Git 仓库，以及带历史、差异、冲突和 externals 的多个 SVN 工作副本。
 
-验收时用独立配置打开完整演示工作区，核对扩展安装与移除、多仓库切换、文件 Diff、日志、提交、更新、冲突处理和原生 Git 面板。钥匙串及证书指纹流程已有本地验证，实际内网仓库需要按部署环境验收。
+验收时用独立配置打开完整演示工作区，核对内置 SVN 自动加载与关闭、多仓库切换、文件 Diff、日志、提交、更新、冲突处理和原生 Git 面板。钥匙串及证书指纹流程已有本地验证，实际内网仓库需要按部署环境验收。
 
 ## GitHub Actions
 
 | 工作流 | 用途 | 产物 |
 | --- | --- | --- |
-| **Wu Plus verify macOS** | 手动运行，快速验收 Apple Silicon 上的宿主与 SVN | 临时签名的 `Wu Plus Dev.app` 和 `Subversion.zip`，宿主以 ZIP 提供 |
-| **Wu Plus candidate** | 手动运行或定时检查后构建正式候选 | macOS Apple Silicon 与 Intel、Linux x86_64 与 ARM64、Windows x86_64 的候选包，以及 macOS SVN 扩展 |
+| **Wu Plus verify macOS** | 手动运行，快速验收 Apple Silicon 上的宿主与 SVN | 内置 SVN 的临时签名 `Wu Plus Dev.app`，以 ZIP 提供 |
+| **Wu Plus candidate** | 手动运行或定时检查后构建正式候选 | macOS Apple Silicon 与 Intel、Linux x86_64 与 ARM64、Windows x86_64 的候选包，macOS 包内置 SVN 后台 |
 | **Wu Plus publish** | 手动发布已验收的完整候选 | GitHub Releases 及应用内更新使用的正式资产 |
 
-快速验收只运行 Apple Silicon 的 SVN 集成测试并打包开发版，省去 DMG、dSYM 和远程服务端构建。解压后用下面的命令启动独立配置，再安装同一次运行的扩展。
+快速验收只运行 Apple Silicon 的 SVN 集成测试并打包开发版，省去 DMG、dSYM 和远程服务端构建。解压后用下面的命令启动独立配置，即可验收内置 SVN。
 
 ~~~bash
 open -n "/path/to/Wu Plus Dev.app" --args --user-data-dir "$HOME/.wu-plus-verify"
@@ -53,7 +53,7 @@ open -n "/path/to/Wu Plus Dev.app" --args --user-data-dir "$HOME/.wu-plus-verify
 
 ### macOS 签名
 
-完整候选沿用 Wu 的签名脚本。没有配置签名证书时使用临时签名，配置证书后使用对应身份签名，公证凭据齐全时提交 Apple 公证。Windows 和 Linux 使用各自的 Wu 打包脚本。
+完整候选沿用 Wu 的签名脚本，SVN 后台在 App 签名前装入 `Contents/MacOS`。没有配置签名证书时使用临时签名，配置证书后使用对应身份签名，公证凭据齐全时提交 Apple 公证。Windows 和 Linux 使用各自的 Wu 打包脚本。
 
 | GitHub Actions 机密 | 用途 |
 | --- | --- |
@@ -67,4 +67,4 @@ open -n "/path/to/Wu Plus Dev.app" --args --user-data-dir "$HOME/.wu-plus-verify
 2. 在 **Wu Plus publish** 提供候选运行 ID 和候选摘要中的 `SHA256SUMS` 文件摘要。发布工作流从默认分支接受本仓库成功的完整候选，并逐项复核包和发行说明的哈希。
 3. 发布后的标签格式为 `wu-plus-v<版本>`。Wu 原生更新器从本项目的 GitHub Releases 下载匹配平台的资产，校验 GitHub 提供的 SHA-256，重启后应用更新。
 
-升级日常配置前保留一份数据目录备份。回退时，退出 Wu Plus，安装上一版，并使用与上一版宿主匹配的 SVN 扩展。如果配置或数据库格式已经升级，再恢复升级前的数据备份。 [安装与迁移](INSTALL.md#设置和应用更新) · [发布工作流](../.github/workflows/wu-plus-publish.yml)
+升级日常配置前保留一份数据目录备份。回退时，退出 Wu Plus，安装带相应 SVN 后台的上一版 App。如果配置或数据库格式已经升级，再恢复升级前的数据备份。 [安装与迁移](INSTALL.md#设置和应用更新) · [发布工作流](../.github/workflows/wu-plus-publish.yml)

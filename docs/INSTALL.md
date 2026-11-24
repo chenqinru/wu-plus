@@ -24,15 +24,11 @@ WU_BUNDLE_PATH="/path/to/wu-plus-linux-x86_64.tar.gz" sh script/install.sh
 
 下载并运行 `Wu-Plus-x86_64.exe`。如果安装时选择将命令行目录加入 PATH，重新打开终端后可使用 `wu-plus`。通过系统的已安装应用列表卸载。
 
-## 安装 Subversion 扩展
+## 启用 Subversion
 
-扩展支持 macOS 本地工作区，要求 SVN 1.14 或更新版本。使用 Homebrew 时运行 `brew install subversion`。可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
+Wu Plus 在 macOS 本地工作区自动检测 SVN 工作副本，按需启动 App 内置的后台。后台使用系统的 SVN 1.14 或更新版本。使用 Homebrew 时运行 `brew install subversion`。如果 IDE 提示缺少兼容版本，安装后在 SVN 面板点「重试」重新检测。可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
 
-1. 下载与宿主来自同一次构建且架构匹配的扩展。完整候选使用 `Subversion-macos-aarch64.zip` 或 `Subversion-macos-x86_64.zip`，快速验收和本地构建使用 `Subversion.zip`。
-2. 把扩展解压到固定位置。在 Wu Plus 扩展页选择「安装开发扩展」，选中包含 `extension.toml` 的 `Subversion` 目录。IDE 通过符号链接加载该目录，使用期间请保留它。
-3. 打开包含 SVN 工作副本的项目。点活动栏的 SVN 图标，也可在命令面板运行「切换 SVN 面板」。用更改面板底部或历史面板顶部的工作副本名称切换仓库。
-
-在扩展页移除 Subversion 即可卸载。若直接用新文件替换已安装扩展目录里的后台程序，重启 Wu Plus 后会加载新程序。
+打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标，也可在命令面板运行「切换 SVN 面板」。用更改面板底部或历史面板顶部的工作副本名称切换仓库。在「设置 → 版本控制 → Subversion（SVN）」关闭「启用 Subversion」可停用 SVN。
 
 ## 使用 SVN
 
@@ -59,4 +55,4 @@ SVN 沿用用户的 SVN 配置、认证缓存和 SSH Agent。认证失败时，�
 
 macOS 上，Wu Plus 默认将配置、扩展、状态、日志和缓存存放在 `~/Library/Application Support/Wu Plus`。从官方 Wu 首次迁移时，先退出两个应用，再从仓库根目录运行 `scripts/migrate-profile.sh`。脚本会将已有设置和扩展复制到尚未创建的 Wu Plus 数据目录。迁移应在首次启动 Wu Plus 前完成。
 
-正式版通过应用内「检查更新」获取本项目 Releases 的版本，自动检查遵循 `auto_update` 设置，更新需要重启。SVN 扩展应使用与新宿主匹配的构建包。 [更新与回退](MAINTAINING.md#发布与回退)
+正式版通过应用内「检查更新」获取本项目 Releases 的版本，自动检查遵循 `auto_update` 设置，更新需要重启。SVN 后台随 App 一起更新。 [更新与回退](MAINTAINING.md#发布与回退)

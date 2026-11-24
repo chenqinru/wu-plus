@@ -426,6 +426,7 @@ pub struct BlameSettings {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SvnSettings {
+    pub enabled: bool,
     pub show_change_markers: bool,
     pub inline_blame: bool,
     pub blame_gutter: bool,
@@ -633,6 +634,7 @@ impl Settings for ProjectSettings {
             },
             git: git_settings,
             svn: SvnSettings {
+                enabled: svn.and_then(|svn| svn.enabled).unwrap_or(true),
                 show_change_markers: svn.and_then(|svn| svn.show_change_markers).unwrap_or(true),
                 inline_blame: svn.and_then(|svn| svn.inline_blame).unwrap_or(true),
                 blame_gutter: svn.and_then(|svn| svn.blame_gutter).unwrap_or(false),

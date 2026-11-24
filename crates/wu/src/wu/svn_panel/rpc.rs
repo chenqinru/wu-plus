@@ -16,14 +16,15 @@ use std::{
 use util::command::{Child, Stdio, new_command};
 
 const VERSION: u64 = 2;
+pub(super) const EXECUTABLE_NAME: &str = "wu-plus-subversion-provider";
 
-pub(super) fn provider_executable(extension_dir: &Path) -> Result<PathBuf, Error> {
+pub(super) fn development_executable(extension_dir: &Path) -> Result<PathBuf, Error> {
     let canonical = |path: &Path| {
         path.canonicalize()
             .map_err(|error| Error::transport(error.to_string()))
     };
     let extension_dir = canonical(extension_dir)?;
-    let executable = canonical(&extension_dir.join("bin/wu-plus-subversion-provider"))?;
+    let executable = canonical(&extension_dir.join("bin").join(EXECUTABLE_NAME))?;
     if !executable.starts_with(&extension_dir) {
         return Err(Error::transport(
             "The provider executable points outside the installed extension.",
@@ -58,8 +59,8 @@ pub(super) struct Client {
 }
 
 impl Client {
-    pub(super) async fn connect(extension_dir: &Path) -> Result<Arc<Self>, Error> {
-        let client = Self::start(extension_dir)?;
+    pub(super) async fn connect(executable: &Path) -> Result<Arc<Self>, Error> {
+        let client = Self::start(executable)?;
         let result = client
             .request(client.next_id(), "initialize", json!({}))
             .await?;
@@ -72,8 +73,8 @@ impl Client {
         Ok(client)
     }
 
-    fn start(extension_dir: &Path) -> Result<Arc<Self>, Error> {
-        let mut child = new_command(provider_executable(extension_dir)?)
+    fn start(executable: &Path) -> Result<Arc<Self>, Error> {
+        let mut child = new_command(executable)
             // A development extension may live in a macOS-protected folder.
             // Relaunching the IDE does not carry transient folder access.
             .current_dir(paths::data_dir())

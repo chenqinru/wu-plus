@@ -71,7 +71,6 @@ jobs:
             Wu-Plus-{aarch64,x86_64}.dmg Wu-Plus-x86_64.exe
             wu-plus-linux-{aarch64,x86_64}.tar.gz
             wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz
-            Subversion-macos-{aarch64,x86_64}.zip
           )
           cp ../manifest/{version.txt,RELEASE_NOTES.md} .
           diff -u ../manifest/SHA256SUMS <(sha256sum version.txt RELEASE_NOTES.md "${assets[@]}")

@@ -19,8 +19,10 @@ use gpui::{
 };
 use i18n::{n, t};
 use notifications::status_toast::StatusToast;
+use project::project_settings::ProjectSettings;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use settings::{Settings, SettingsStore};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -28,6 +30,7 @@ use std::{
     time::Duration,
 };
 use ui::{Checkbox, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     OpenOptions, OpenVisible, Panel, Workspace,
     dock::{DockPosition, PanelEvent},
@@ -204,11 +207,61 @@ fn project_statuses(repos: &[Repo]) -> BTreeMap<PathBuf, GitSummary> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Provider {
-    directory: PathBuf,
+enum Provider {
+    Bundled(PathBuf),
+    Development(PathBuf),
+}
+
+impl Provider {
+    fn executable(&self) -> Result<PathBuf, rpc::Error> {
+        match self {
+            Self::Bundled(executable) => Ok(executable.clone()),
+            Self::Development(directory) => rpc::development_executable(directory),
+        }
+    }
 }
 
 const EXTENSION_ID: &str = "wu-plus-subversion";
+
+fn has_svn_working_copy(roots: &[PathBuf]) -> bool {
+    let mut directories = Vec::new();
+    for root in roots {
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        if root
+            .ancestors()
+            .any(|directory| directory.join(".svn").is_dir())
+        {
+            return true;
+        }
+        if root.is_dir() {
+            directories.push(root);
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    while let Some(directory) = directories.pop() {
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        // Let the provider handle very large scans and report its discovery limit.
+        if visited.len() > 75_000 || directory.join(".svn").is_dir() {
+            return true;
+        }
+        if let Ok(entries) = directory.read_dir() {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && !matches!(
+                        entry.file_name().to_str(),
+                        Some(".git" | ".hg" | ".svn" | "node_modules")
+                    )
+                {
+                    directories.push(entry.path());
+                }
+            }
+        }
+    }
+    false
+}
 
 type Connection = Shared<Task<Result<Arc<rpc::Client>, rpc::Error>>>;
 
@@ -307,12 +360,12 @@ pub(super) struct SvnPanel {
 impl SvnPanel {
     pub(super) fn load(
         workspace: WeakEntity<Workspace>,
-        store: Entity<ExtensionStore>,
         mut cx: gpui::AsyncWindowContext,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         let workspace_handle = workspace.clone();
         let result = workspace.update_in(&mut cx, |workspace, window, cx| {
             let project = workspace.project().clone();
+            let store = ExtensionStore::try_global(cx);
             cx.new(|cx| Self::new(workspace_handle, project, store, window, cx))
         });
         Task::ready(result)
@@ -321,7 +374,7 @@ impl SvnPanel {
     fn new(
         workspace: WeakEntity<Workspace>,
         project: Entity<project::Project>,
-        store: Entity<ExtensionStore>,
+        store: Option<Entity<ExtensionStore>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -335,16 +388,12 @@ impl SvnPanel {
             editor
         });
         let commit_events = cx.observe(&commit_editor, |_, _, cx| cx.notify());
+        let settings_store = store.clone();
         let mut subscriptions = vec![
             commit_events,
-            cx.subscribe_in(&store, window, |this, store, event, window, cx| {
-                if let extension_host::Event::ExtensionsUpdated
-                | extension_host::Event::ExtensionInstalled(_)
-                | extension_host::Event::ExtensionUninstalled(_) = event
-                {
-                    let provider = this.extension_provider(store.read(cx), cx);
-                    this.sync_extension(provider, window, cx);
-                }
+            cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
+                let provider = this.resolve_provider(settings_store.as_ref(), cx);
+                this.sync_provider(provider, window, cx);
             }),
             cx.subscribe_in(&project, window, |this, _, event, window, cx| match event {
                 project::Event::WorktreeAdded(_)
@@ -370,6 +419,11 @@ impl SvnPanel {
                                     {
                                         return false;
                                     }
+                                    if this.repos.is_empty() {
+                                        return worktree
+                                            .entry_for_path(path)
+                                            .is_some_and(|entry| entry.is_dir());
+                                    }
                                     let path = worktree.abs_path().join(relative_path);
                                     this.repos.iter().any(|repo| {
                                         path.starts_with(&repo.copy.root)
@@ -384,6 +438,21 @@ impl SvnPanel {
                 _ => {}
             }),
         ];
+        if let Some(store) = &store {
+            subscriptions.push(
+                cx.subscribe_in(store, window, |this, store, event, window, cx| {
+                    if matches!(
+                        event,
+                        extension_host::Event::ExtensionsUpdated
+                            | extension_host::Event::ExtensionInstalled(_)
+                            | extension_host::Event::ExtensionUninstalled(_)
+                    ) {
+                        let provider = this.resolve_provider(Some(&store), cx);
+                        this.sync_provider(provider, window, cx);
+                    }
+                }),
+            );
+        }
         if let Some(workspace) = workspace.upgrade() {
             subscriptions.push(cx.subscribe_in(
                 &workspace,
@@ -445,22 +514,32 @@ impl SvnPanel {
             operation: None,
             deferred_refresh: None,
         };
-        let provider = this.extension_provider(store.read(cx), cx);
-        this.sync_extension(provider, window, cx);
+        let provider = this.resolve_provider(store.as_ref(), cx);
+        this.sync_provider(provider, window, cx);
         this
     }
 
-    fn extension_provider(&self, store: &ExtensionStore, cx: &App) -> Option<Provider> {
-        (self.project.read(cx).is_local()
-            && store
-                .dev_extensions()
-                .any(|extension| extension.id.as_ref() == EXTENSION_ID))
-        .then(|| Provider {
-            directory: store.installed_dir.join(EXTENSION_ID),
-        })
+    fn resolve_provider(
+        &self,
+        store: Option<&Entity<ExtensionStore>>,
+        cx: &App,
+    ) -> Option<Provider> {
+        if !self.project.read(cx).is_local() || !ProjectSettings::get_global(cx).svn.enabled {
+            return None;
+        }
+        if let Ok(executable) = cx.path_for_auxiliary_executable(rpc::EXECUTABLE_NAME)
+            && executable.is_file()
+        {
+            return Some(Provider::Bundled(executable));
+        }
+        let store = store?.read(cx);
+        store
+            .dev_extensions()
+            .any(|extension| extension.id.as_ref() == EXTENSION_ID)
+            .then(|| Provider::Development(store.installed_dir.join(EXTENSION_ID)))
     }
 
-    fn sync_extension(
+    fn sync_provider(
         &mut self,
         provider: Option<Provider>,
         window: &mut Window,
@@ -522,9 +601,9 @@ impl SvnPanel {
         Some(
             self.connecting
                 .get_or_insert_with(|| {
-                    cx.background_spawn(
-                        async move { rpc::Client::connect(&provider.directory).await },
-                    )
+                    cx.background_spawn(async move {
+                        rpc::Client::connect(&provider.executable()?).await
+                    })
                     .shared()
                 })
                 .clone(),
@@ -575,53 +654,79 @@ impl SvnPanel {
         self.pending_refresh = None;
         self.deferred_refresh = None;
         let ignored = self.view_options.show_ignored;
-        let Some(connection) = self.connection(cx) else {
-            return;
-        };
+        let needs_probe = !self.active && self.client.is_none() && self.connecting.is_none();
+        let probe = needs_probe.then(|| {
+            let roots = current_roots.clone();
+            cx.background_spawn(async move { has_svn_working_copy(&roots) })
+        });
         self.revision += 1;
         let revision = self.revision;
         self.scanning = true;
         self.scan_error = None;
-        let scan = cx.background_spawn(async move {
-            let client = connection.await?;
-            let (copies, warnings) = if discover {
-                let reply = client
-                    .request(client.next_id(), "discover", json!({"roots":current_roots}))
-                    .await?;
-                let result = serde_json::from_value::<Discovery>(reply).map_err(decode_error)?;
-                (result.copies, result.warnings)
-            } else {
-                (existing, Vec::new())
-            };
-            let mut repos = Vec::with_capacity(copies.len());
-            for copy in copies {
-                let result = client
-                    .request(
-                        client.next_id(),
-                        "status",
-                        json!({"root":copy.root,"ignored":ignored,"diff_stats":true}),
-                    )
-                    .await
-                    .and_then(|value| {
-                        serde_json::from_value::<Status>(value).map_err(decode_error)
-                    });
-                repos.push(match result {
-                    Ok(Status { copy, entries }) => Repo {
-                        copy,
-                        entries,
-                        error: None,
-                    },
-                    Err(error) => Repo {
-                        copy,
-                        entries: Vec::new(),
-                        error: Some(error.message),
-                    },
-                });
-            }
-            let statuses = project_statuses(&repos);
-            Ok::<_, rpc::Error>((client, repos, warnings, statuses))
-        });
         self.refresh = Some(cx.spawn_in(window, async move |this, cx| {
+            if let Some(probe) = probe
+                && !probe.await
+            {
+                this.update_in(cx, |this, window, cx| {
+                    if revision == this.revision {
+                        this.scanning = false;
+                        if this.active || this.pending_refresh.is_some() {
+                            this.schedule_refresh(true, window, cx);
+                        }
+                        cx.notify();
+                    }
+                })
+                .log_err();
+                return;
+            }
+            let Ok(Some(connection)) = this.update(cx, |this, cx| {
+                if revision != this.revision {
+                    return None;
+                }
+                this.connection(cx)
+            }) else {
+                return;
+            };
+            let scan = cx.background_spawn(async move {
+                let client = connection.await?;
+                let (copies, warnings) = if discover {
+                    let reply = client
+                        .request(client.next_id(), "discover", json!({"roots":current_roots}))
+                        .await?;
+                    let result =
+                        serde_json::from_value::<Discovery>(reply).map_err(decode_error)?;
+                    (result.copies, result.warnings)
+                } else {
+                    (existing, Vec::new())
+                };
+                let mut repos = Vec::with_capacity(copies.len());
+                for copy in copies {
+                    let result = client
+                        .request(
+                            client.next_id(),
+                            "status",
+                            json!({"root":copy.root,"ignored":ignored,"diff_stats":true}),
+                        )
+                        .await
+                        .and_then(|value| {
+                            serde_json::from_value::<Status>(value).map_err(decode_error)
+                        });
+                    repos.push(match result {
+                        Ok(Status { copy, entries }) => Repo {
+                            copy,
+                            entries,
+                            error: None,
+                        },
+                        Err(error) => Repo {
+                            copy,
+                            entries: Vec::new(),
+                            error: Some(error.message),
+                        },
+                    });
+                }
+                let statuses = project_statuses(&repos);
+                Ok::<_, rpc::Error>((client, repos, warnings, statuses))
+            });
             let result = scan.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if revision != this.revision {
@@ -631,10 +736,17 @@ impl SvnPanel {
                 this.connecting = None;
                 match result {
                     Ok((client, repos, warnings, statuses)) => {
-                        this.client = Some(client);
+                        this.client = (!repos.is_empty() || this.active).then_some(client);
                         if discover {
-                            let previous = this.repos.iter().map(|repo| &repo.copy.root).collect::<BTreeSet<_>>();
-                            let current = repos.iter().map(|repo| &repo.copy.root).collect::<BTreeSet<_>>();
+                            let previous = this
+                                .repos
+                                .iter()
+                                .map(|repo| &repo.copy.root)
+                                .collect::<BTreeSet<_>>();
+                            let current = repos
+                                .iter()
+                                .map(|repo| &repo.copy.root)
+                                .collect::<BTreeSet<_>>();
                             let changed_roots = previous
                                 .symmetric_difference(&current)
                                 .map(|root| (**root).clone())
@@ -684,7 +796,13 @@ impl SvnPanel {
                     Err(error) => {
                         this.client = None;
                         this.history_requests.clear();
-                        this.scan_error = Some(error.message);
+                        this.scan_error = Some(match error.kind.as_str() {
+                            "svn_unavailable" | "svn_version" => {
+                                t!("Install Subversion 1.14 or newer (brew install subversion).")
+                                    .to_string()
+                            }
+                            _ => error.message,
+                        });
                     }
                 }
                 if let Some(discover) = this.pending_refresh {
@@ -1592,6 +1710,9 @@ impl Panel for SvnPanel {
             return;
         }
         self.active = active;
+        if !active && self.repos.is_empty() && !self.busy {
+            self.client = None;
+        }
         if active && !self.scanning {
             if self.client.is_none() || self.repos.is_empty() {
                 self.refresh(true, window, cx);
@@ -1850,7 +1971,7 @@ impl SvnPanel {
         let Some(terminal) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
             return;
         };
-        let binary = match rpc::provider_executable(&provider.directory) {
+        let binary = match provider.executable() {
             Ok(binary) => binary,
             Err(error) => {
                 self.set_error(error, None, cx);

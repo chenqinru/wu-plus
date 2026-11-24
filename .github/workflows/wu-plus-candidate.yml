@@ -127,8 +127,6 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           mkdir "$RUNNER_TEMP/bundle"
-          CARGO_BUILD_TARGET="$TARGET_ARCH-apple-darwin" scripts/package-plugin.sh "$RUNNER_TEMP/subversion"
-          mv "$RUNNER_TEMP/subversion/Subversion.zip" "$RUNNER_TEMP/bundle/Subversion-macos-$TARGET_ARCH.zip"
           cp "target/$TARGET_ARCH-apple-darwin/release/Wu-Plus-$TARGET_ARCH.dmg" \
             "target/wu-remote-server-macos-$TARGET_ARCH.gz" "$RUNNER_TEMP/bundle/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -230,8 +228,7 @@ jobs:
           sha256sum version.txt RELEASE_NOTES.md \
             Wu-Plus-{aarch64,x86_64}.dmg Wu-Plus-x86_64.exe \
             wu-plus-linux-{aarch64,x86_64}.tar.gz \
-            wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz \
-            Subversion-macos-{aarch64,x86_64}.zip > "$RUNNER_TEMP/SHA256SUMS"
+            wu-remote-server-{macos,linux}-{aarch64,x86_64}.gz wu-remote-server-windows-x86_64.gz > "$RUNNER_TEMP/SHA256SUMS"
           cp version.txt "$RUNNER_TEMP/version.txt"
           {
             printf '### Wu Plus %s\n\n' "$VERSION"

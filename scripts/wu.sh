@@ -49,7 +49,6 @@ if [[ $mode == bundle ]]; then
   trap 'rm -rf "$stage"' EXIT
   ditto "$bundle_dir/dmg/$app" "$stage/$app"
   cp "$bundle_dir/$dmg" "$stage/$dmg"
-  CARGO_BUILD_TARGET="$triple" scripts/package-plugin.sh "$artifact_dir"
   if [[ -d "$artifact_dir/$app" ]]; then
     previous=$(mktemp -d "$artifact_dir/previous.XXXXXX")
     mv "$artifact_dir/$app" "$previous/"

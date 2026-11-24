@@ -1150,7 +1150,14 @@ impl SvnPanel {
         if let Some(error) = &self.scan_error {
             return Some(
                 panel_placeholder(t!("Error loading: {error}", error = error.as_str()), false)
-                    .child(self.refresh_button(cx))
+                    .child(
+                        Button::new("svn-retry-discovery", t!("Retry"))
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Outlined)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(true, window, cx);
+                            })),
+                    )
                     .into_any_element(),
             );
         }

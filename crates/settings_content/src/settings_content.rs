@@ -329,6 +329,8 @@ pub struct SettingsContent {
 #[with_fallible_options]
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct SvnSettingsContent {
+    /// Enable Subversion integration for local workspaces.
+    pub enabled: Option<bool>,
     /// Show SVN change markers beside line numbers and on the scrollbar.
     pub show_change_markers: Option<bool>,
     /// Show SVN blame at the end of the current line.
