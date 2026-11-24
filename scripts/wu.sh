@@ -102,6 +102,18 @@ case "$mode" in
     fi
     ln -sfn "$codelldb_dir" "$project/.build/codelldb"
 
+    # Wu 1.5.0 does not support the launch-specific adapter_binary setting.
+    wu_data="$HOME/Library/Application Support/Wu"
+    wu_adapters="$wu_data/debug_adapters"
+    cached_adapter="CodeLLDB_$codelldb_version"
+    if [[ -d "$wu_data" && ! -e "$wu_adapters/CodeLLDB/$cached_adapter" ]]; then
+      mkdir -p "$wu_adapters/CodeLLDB"
+      cache_stage=$(mktemp -d "$wu_adapters/.codelldb.XXXXXX")
+      trap 'rm -rf "$stage" "$cache_stage"' EXIT
+      ditto "$project/.build/$codelldb_dir" "$cache_stage/$cached_adapter"
+      mv -n "$cache_stage/$cached_adapter" "$wu_adapters/CodeLLDB/"
+    fi
+
     # Keep the macOS debugging entitlement off the binary used for packaging.
     cp -c "$target/release-fast/wu" "$stage/wu"
     printf '%s\n' '{"com.apple.security.get-task-allow":true}' |

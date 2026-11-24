@@ -15,7 +15,7 @@ scripts/wu.sh build
 
 Rust 工具链在 `rust-toolchain.toml` 中固定。`check` 检查当前源码并运行 SVN 集成测试，`build` 构建本地宿主二进制。如需包含 SVN 后台的 macOS DMG，运行 `scripts/wu.sh bundle`。本地和 CI 共用 Wu 原生的 `script/bundle-mac`，产物默认写入 `dist/`，可通过 `WU_PLUS_DIST_DIR` 调整。只需重建开发扩展时可直接运行 `scripts/package-plugin.sh`。
 
-用 Wu 打开仓库根目录，Apple Silicon 可选「调试 Wu Plus（Apple Silicon / SVN）」。启动前会构建宿主和扩展、准备 CodeLLDB，并用 `.build/dev-profile` 启动独立实例。只调试宿主时，跨平台配置「Debug Wu Plus (CodeLLDB)」沿用 Wu 原生的 Cargo 构建与调试器查找方式。 [上游开发文档](https://zed.dev/docs/development)
+用 Wu 打开仓库根目录，Apple Silicon 可选「调试 Wu Plus（Apple Silicon / SVN）」。启动前会构建宿主和扩展、准备 CodeLLDB，并用 `.build/dev-profile` 启动独立实例。调试准备也会将固定版本的 CodeLLDB 放进已存在的官方 Wu 数据目录，供 Wu 1.5.0 联网检查失败时从本地缓存加载。只调试宿主时，跨平台配置「Debug Wu Plus (CodeLLDB)」沿用 Wu 原生的 Cargo 构建与调试器查找方式。 [上游开发文档](https://zed.dev/docs/development)
 
 ### 回归验收
 
