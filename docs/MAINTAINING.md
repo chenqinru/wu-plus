@@ -59,6 +59,8 @@ Windows 运行 `Wu-Plus-Dev-x86_64.exe` 安装后，在 PowerShell 中将下面�
 
 快速验收按平台和架构使用独立的 Rust 缓存。正式候选的 macOS Apple Silicon、macOS Intel 和 Windows x86_64 使用自己的缓存。手动运行时可用 `rust_cache` 切换缓存。比较同一提交的冷、热构建时，确认缓存是否命中，并记录缓存恢复、保存和排队时间。 [快速验收配置](../.github/workflows/wu-plus-verify.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
 
+macOS 正式候选按架构并行构建 IDE 和远程服务端。两个任务可以读取同一架构的 Rust 缓存，由 IDE 任务保存。候选清单会收齐两种架构的安装包和远程服务端，再生成发布校验值。
+
 ### 跟进 Wu 上游
 
 1. 定时任务会查找上游正式发布，并在运行摘要提示版本差异。把新标签对应的提交合入集成分支，更新 `scripts/wu-upstream.json` 的标签和提交。
