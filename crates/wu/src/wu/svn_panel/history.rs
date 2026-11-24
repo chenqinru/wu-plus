@@ -1,6 +1,8 @@
 use super::*;
 use futures::future::WeakShared;
-use gpui::{DefiniteLength, MouseButton, ScrollStrategy, SharedString};
+use gpui::{
+    DefiniteLength, ListAlignment, ListOffset, ListState, ScrollStrategy, SharedString, list,
+};
 use std::path::Path;
 use ui::{
     ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, HighlightedLabel,
@@ -25,8 +27,17 @@ impl PanelHistory {
     pub(super) fn reset_view(&mut self, root: Option<&Path>) {
         self.filtered = None;
         if let Some(history) = root.and_then(|root| self.repositories.get_mut(root)) {
-            history.selected = None;
             history.interactive = false;
+        }
+    }
+
+    pub(super) fn remeasure(&self) {
+        for history in self
+            .repositories
+            .values()
+            .chain(self.filtered.iter().map(|(_, history)| history))
+        {
+            history.panel.list.remeasure();
         }
     }
 
@@ -56,6 +67,107 @@ struct History {
     failed: bool,
     loading: Option<Task<()>>,
     interactive: bool,
+    panel: HistoryList,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HistoryRow {
+    revision: u64,
+    path: Option<usize>,
+}
+
+struct HistoryList {
+    list: ListState,
+    rows: Vec<HistoryRow>,
+    expanded: BTreeSet<u64>,
+    focused: Option<HistoryRow>,
+}
+
+impl Default for HistoryList {
+    fn default() -> Self {
+        Self {
+            list: ListState::new(0, ListAlignment::Top, px(300.)),
+            rows: Vec::new(),
+            expanded: BTreeSet::new(),
+            focused: None,
+        }
+    }
+}
+
+impl HistoryList {
+    fn rebuild(&mut self, entries: &[Revision]) {
+        let mut rows = Vec::new();
+        for entry in entries {
+            let revision = entry.revision;
+            rows.push(HistoryRow {
+                revision,
+                path: None,
+            });
+            if self.expanded.contains(&revision) {
+                rows.extend((0..entry.paths.len()).map(|path| HistoryRow {
+                    revision,
+                    path: Some(path),
+                }));
+            }
+        }
+        let common = self
+            .rows
+            .iter()
+            .zip(&rows)
+            .take_while(|(left, right)| left == right)
+            .count();
+        if common == self.rows.len() && common == rows.len() {
+            return;
+        }
+
+        let top = self.list.logical_scroll_top();
+        let anchor = self.rows.get(top.item_ix).copied();
+        let old_len = self.rows.len();
+        let suffix = self.rows[common..]
+            .iter()
+            .rev()
+            .zip(rows[common..].iter().rev())
+            .take_while(|(left, right)| left == right)
+            .count();
+        self.rows = rows;
+        self.list
+            .splice(common..old_len - suffix, self.rows.len() - common - suffix);
+        if let Some(index) = anchor.and_then(|row| self.row_index(row)) {
+            self.list.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: if self.rows.get(index).copied() == anchor {
+                    top.offset_in_item
+                } else {
+                    px(0.)
+                },
+            });
+        } else if common == 0 {
+            self.list.scroll_to(ListOffset::default());
+        }
+        self.focused = self
+            .focused
+            .and_then(|row| self.row_index(row).map(|index| self.rows[index]));
+    }
+
+    fn row_index(&self, row: HistoryRow) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|candidate| *candidate == row)
+            .or_else(|| {
+                self.rows
+                    .iter()
+                    .position(|candidate| candidate.revision == row.revision)
+            })
+    }
+
+    fn near_end(&self) -> bool {
+        !self.rows.is_empty()
+            && self.list.viewport_bounds().size.height > px(0.)
+            && self
+                .list
+                .item_is_below_viewport(self.rows.len().saturating_sub(5))
+                == Some(false)
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -100,9 +212,16 @@ impl HistoryFetch {
                 && panel.read_with(cx, |panel, _| interactive(panel)).unwrap_or(false) =>
             {
                 let value = authentication::retry(
-                    &self.client, self.client.next_id(), "read", self.params,
-                    error, panel, interactive, cx,
-                ).await?;
+                    &self.client,
+                    self.client.next_id(),
+                    "read",
+                    self.params,
+                    error,
+                    panel,
+                    |panel, _| interactive(panel),
+                    cx,
+                )
+                .await?;
                 serde_json::from_value(value).map_err(decode_error)
             }
             result => result,
@@ -176,7 +295,7 @@ mod tests {
         let mut panel = PanelHistory::default();
         let first = panel.repositories.entry(first_root.into()).or_default();
         for (revision, append) in [(9, false), (8, true)] {
-            first.receive(
+            first.receive_in_panel(
                 Page {
                     revisions: vec![Revision {
                         revision,
@@ -190,7 +309,15 @@ mod tests {
                 append,
             );
         }
-        first.selected = Some(8);
+        first.panel.expanded.insert(8);
+        first.panel.focused = Some(HistoryRow {
+            revision: 8,
+            path: None,
+        });
+        first.panel.list.scroll_to(ListOffset {
+            item_ix: 1,
+            offset_in_item: px(4.),
+        });
         panel.filtered = Some(("file.txt".into(), History::default()));
         panel.reset_view(Some(first_root));
 
@@ -200,8 +327,44 @@ mod tests {
             .expect("cached working copy history");
         assert_eq!(first.entries.len(), 2);
         assert_eq!(first.next_page(), Some(7));
-        assert_eq!(first.selected, None);
+        assert!(first.panel.expanded.contains(&8));
+        assert_eq!(first.panel.focused.map(|row| row.revision), Some(8));
+        assert_eq!(first.panel.list.logical_scroll_top().item_ix, 1);
         assert!(!first.needs_load(true));
+    }
+
+    #[test]
+    fn refreshing_an_overlapping_page_keeps_the_older_rows_and_anchor() {
+        let page = |revisions: &[u64], next_before| Page {
+            revisions: revisions
+                .iter()
+                .map(|&revision| Revision {
+                    revision,
+                    author: String::new(),
+                    date: String::new(),
+                    message: String::new(),
+                    paths: Vec::new(),
+                })
+                .collect(),
+            next_before,
+        };
+        let mut history = History::default();
+        history.receive_in_panel(page(&[9, 8, 7], Some(6)), false);
+        history.receive_in_panel(page(&[6, 5], None), true);
+        history.panel.list.scroll_to(ListOffset {
+            item_ix: 3,
+            offset_in_item: px(4.),
+        });
+        history.receive_in_panel(page(&[10, 9, 8], Some(7)), false);
+
+        let top = history.panel.list.logical_scroll_top();
+        assert_eq!(
+            history.panel.rows.get(top.item_ix).map(|row| row.revision),
+            Some(6)
+        );
+        assert_eq!(top.offset_in_item, px(4.));
+        assert_eq!(history.entries.len(), 6);
+        assert_eq!(history.next_page(), None);
     }
 
     #[test]
@@ -241,6 +404,34 @@ impl History {
     fn next_page(&self) -> Option<u64> {
         self.next_before
             .filter(|_| self.loaded && self.loading.is_none())
+    }
+
+    fn receive_in_panel(&mut self, mut page: Page, append: bool) {
+        if !append
+            && page.next_before.is_some()
+            && let Some(last) = page.revisions.last()
+            && let Ok(overlap) = self
+                .entries
+                .binary_search_by(|entry| last.revision.cmp(&entry.revision))
+            && let Some(older) = self.entries.get(overlap + 1..)
+            && !older.is_empty()
+        {
+            page.revisions.extend(older.iter().cloned());
+            page.next_before = self.next_before;
+        }
+        self.receive(page, append);
+        if !append {
+            self.panel.expanded.retain(|revision| {
+                self.entries
+                    .binary_search_by(|entry| revision.cmp(&entry.revision))
+                    .is_ok()
+            });
+        }
+        self.panel.rebuild(&self.entries);
+    }
+
+    fn can_auto_paginate(&self) -> bool {
+        !self.failed && self.next_page().is_some() && self.panel.near_end()
     }
 
     fn receive(&mut self, page: Page, append: bool) {
@@ -284,6 +475,16 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.load_visible_history(append, true, window, cx);
+    }
+
+    fn load_visible_history(
+        &mut self,
+        append: bool,
+        interactive: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let before = if append {
             let Some(history) = self
                 .selected_root
@@ -300,7 +501,7 @@ impl SvnPanel {
             None
         };
         let path = self.history.filtered.as_ref().map(|(path, _)| path.clone());
-        self.load_panel_history(path, before.as_deref(), append, true, window, cx);
+        self.load_panel_history(path, before.as_deref(), append, interactive, window, cx);
     }
 
     pub(super) fn open_filtered_history(
@@ -362,7 +563,7 @@ impl SvnPanel {
                 };
                 history.loading = None;
                 match result {
-                    Ok(page) => history.receive(page, append),
+                    Ok(page) => history.receive_in_panel(page, append),
                     Err(error) => {
                         history.failed = true;
                         if error.kind != "cancelled" {
@@ -656,6 +857,7 @@ impl SvnPanel {
                     this.scroll.set_offset(gpui::point(px(0.), px(0.)));
                     this.history.reset_view(this.selected_root.as_deref());
                     this.history.visible = history;
+                    this.focus.focus(window, cx);
                     if history {
                         this.preload_history(true, window, cx);
                     }
@@ -675,46 +877,159 @@ impl SvnPanel {
             .into_any_element()
     }
 
-    pub(super) fn render_history(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        let hover = colors.element_hover;
-        let selected = colors.element_selected;
-        let focus = colors.panel_focused_border;
-        let panel = v_flex().flex_none().min_w_0();
-        let graph = self.view_options.history_graph;
-        let accent = colors.text_accent;
-        let background = colors.panel_background;
-        let history = self
-            .selected_root
-            .as_deref()
-            .and_then(|root| self.history.active(root));
+    pub(super) fn history_keys(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy
+            || !self.history.visible
+            || !self.focus.is_focused(window)
+            || event.keystroke.modifiers != gpui::Modifiers::default()
+        {
+            return;
+        }
+        let Some(root) = self.selected_root.clone() else {
+            return;
+        };
+        let filtered = self.history.filtered.is_some();
+        let Some(history) = self.history.state_mut(&root, filtered) else {
+            return;
+        };
+        let key = event.keystroke.key.as_ref();
+        let current = history
+            .panel
+            .focused
+            .and_then(|row| history.panel.row_index(row));
+        let row = current
+            .and_then(|index| history.panel.rows.get(index))
+            .copied();
+        let selected = match (key, row) {
+            ("pageup" | "pagedown", _) => {
+                let height = history.panel.list.viewport_bounds().size.height;
+                history
+                    .panel
+                    .list
+                    .scroll_by(if key == "pageup" { -height } else { height });
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            ("up", _) => current.unwrap_or(0).saturating_sub(1),
+            ("down", _) => current.map_or(0, |index| index + 1),
+            ("right", Some(row))
+                if row.path.is_none() && !history.panel.expanded.contains(&row.revision) =>
+            {
+                history.panel.expanded.insert(row.revision);
+                history.panel.rebuild(&history.entries);
+                current.unwrap_or(0)
+            }
+            ("right", _) => current.map_or(0, |index| index + 1),
+            ("left", Some(row)) if history.panel.expanded.remove(&row.revision) => {
+                history.panel.rebuild(&history.entries);
+                history
+                    .panel
+                    .row_index(HistoryRow {
+                        revision: row.revision,
+                        path: None,
+                    })
+                    .unwrap_or(0)
+            }
+            ("left", _) => current.unwrap_or(0).saturating_sub(1),
+            ("enter", _) => {
+                if let Some(row) = row.or_else(|| history.panel.rows.first().copied()) {
+                    self.activate_history_row(row, window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+            _ => return,
+        };
+        let index = selected.min(history.panel.rows.len().saturating_sub(1));
+        if let Some(row) = history.panel.rows.get(index).copied() {
+            history.panel.focused = Some(row);
+            history.panel.list.scroll_to_reveal_item(index);
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+
+    fn activate_history_row(
+        &mut self,
+        row: HistoryRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.selected_root.clone() else {
+            return;
+        };
+        let filtered = self.history.filtered.is_some();
+        let Some(history) = self.history.state_mut(&root, filtered) else {
+            return;
+        };
+        history.panel.focused = Some(row);
+        if let Some(path_index) = row.path {
+            let path = history
+                .entries
+                .iter()
+                .find(|entry| entry.revision == row.revision)
+                .and_then(|entry| entry.paths.get(path_index))
+                .filter(|change| {
+                    change.kind != "dir" && matches!(change.action.as_str(), "A" | "D" | "M" | "R")
+                })
+                .map(|change| change.path.clone());
+            if let Some(path) = path {
+                self.open_revision(root, row.revision, Some(path), window, cx);
+            }
+        } else {
+            if !history.panel.expanded.remove(&row.revision) {
+                history.panel.expanded.insert(row.revision);
+            }
+            history.panel.rebuild(&history.entries);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_history(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(root) = self.selected_root.as_ref() else {
+            return gpui::Empty.into_any_element();
+        };
+        let history = self.history.active(root);
         let Some(history) = history.filter(|history| !history.entries.is_empty()) else {
+            let failed = history.is_some_and(|history| history.failed);
             let loading = history.is_some_and(|history| history.loading.is_some())
                 || (self.scanning && history.is_none_or(|history| history.needs_load(false)));
             let message = if loading {
                 t!("Loading Commit History…")
-            } else if history.is_some_and(|history| history.failed) {
+            } else if failed {
                 t!("Failed to load commit history")
             } else {
                 t!("No commits yet")
             };
-            return panel_ui::panel_placeholder(message, loading).into_any_element();
+            return panel_ui::panel_placeholder(message, loading)
+                .when(failed && !loading, |placeholder| {
+                    placeholder.child(
+                        Button::new("svn-retry-empty-history", t!("Retry"))
+                            .disabled(self.busy || self.client.is_none())
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                panel.load_history(false, window, cx)
+                            })),
+                    )
+                })
+                .into_any_element();
         };
-        let now = time::OffsetDateTime::now_utc();
-        let dot = || {
-            Label::new("•")
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .alpha(0.5)
-                .flex_none()
-        };
-        panel
+        let list_state = history.panel.list.clone();
+        let root = root.clone();
+        let path = self.history.filtered.as_ref().map(|(path, _)| path.clone());
+        let panel = cx.weak_entity();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
             .when_some(
-                self.history
-                    .filtered
-                    .as_ref()
-                    .filter(|(path, _)| path != "."),
-                |panel, (path, _)| {
+                path.as_ref().filter(|path| path.as_str() != "."),
+                |panel, path| {
                     panel.child(
                         div().px_2().py_1().child(
                             Label::new(path.clone())
@@ -725,231 +1040,307 @@ impl SvnPanel {
                     )
                 },
             )
-            .children(
-                history
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        let revision = entry.revision;
-                        let expanded = history.selected == Some(revision);
-                        let subject = entry.message.lines().next().unwrap_or_default().to_owned();
-                        let age = time::OffsetDateTime::parse(
-                            &entry.date,
-                            &time::format_description::well_known::Rfc3339,
-                        )
-                        .map(|date| {
-                            time_format::format_local_timestamp(
-                                date,
-                                now,
-                                time_format::TimestampFormat::Relative,
-                            )
-                        })
-                        .unwrap_or_default();
-                        let id = format!("r{revision}");
-                        let tooltip = [
-                            id.as_str(),
-                            entry.author.as_str(),
-                            entry.date.as_str(),
-                            entry.message.as_str(),
-                        ]
-                        .join("\n");
-                        v_flex()
-                            .child(
-                                v_flex()
-                                    .id(("svn-revision", revision as usize))
-                                    .w_full()
-                                    .min_w_0()
-                                    .px_2()
-                                    .when(!graph, |row| row.py_1().gap_0p5())
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(if expanded && self.focus.is_focused(window) {
-                                        focus
-                                    } else {
-                                        gpui::transparent_black()
-                                    })
-                                    .hover(move |row| row.bg(hover))
-                                    .when(expanded, |row| row.bg(selected))
-                                    .when_else(
-                                        graph,
-                                        |row| {
-                                            row.child(
-                                                h_flex()
-                                                    .h(rems(1.75))
-                                                    .w_full()
-                                                    .gap_1p5()
-                                                    .child(
-                                                        div()
-                                                            .relative()
-                                                            .w(rems(0.9))
-                                                            .h_full()
-                                                            .flex_none()
-                                                            .child(
-                                                                div()
-                                                                    .absolute()
-                                                                    .left(rems(0.4))
-                                                                    .top(if index == 0 {
-                                                                        rems(0.875)
-                                                                    } else {
-                                                                        rems(0.)
-                                                                    })
-                                                                    .bottom(
-                                                                        if index + 1
-                                                                            == history.entries.len()
-                                                                            || expanded
-                                                                        {
-                                                                            rems(0.875)
-                                                                        } else {
-                                                                            rems(0.)
-                                                                        },
-                                                                    )
-                                                                    .w(px(1.))
-                                                                    .bg(accent.opacity(0.65)),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .absolute()
-                                                                    .top(rems(0.625))
-                                                                    .left(rems(0.18))
-                                                                    .size(rems(0.5))
-                                                                    .rounded_full()
-                                                                    .border_1()
-                                                                    .border_color(accent)
-                                                                    .bg(background),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div().flex_1().min_w_0().child(
-                                                            Label::new(subject.clone())
-                                                                .size(LabelSize::Small)
-                                                                .truncate(),
-                                                        ),
-                                                    )
-                                                    .child(
-                                                        Label::new(id.clone())
-                                                            .size(LabelSize::Small)
-                                                            .color(Color::Muted)
-                                                            .flex_none(),
-                                                    ),
-                                            )
-                                        },
-                                        |row| {
-                                            row.child(Label::new(subject.clone()).truncate()).child(
-                                                h_flex()
-                                                    .w_full()
-                                                    .min_w_0()
-                                                    .gap_1p5()
-                                                    .child(
-                                                        Icon::new(IconName::Person)
-                                                            .size(IconSize::Small)
-                                                            .color(Color::Muted),
-                                                    )
-                                                    .when(!entry.author.is_empty(), |row| {
-                                                        row.child(
-                                                            Label::new(entry.author.clone())
-                                                                .size(LabelSize::Small)
-                                                                .color(Color::Muted)
-                                                                .truncate(),
-                                                        )
-                                                        .child(dot())
-                                                    })
-                                                    .when(!age.is_empty(), |row| {
-                                                        row.child(
-                                                            Label::new(age)
-                                                                .size(LabelSize::Small)
-                                                                .color(Color::Muted)
-                                                                .flex_none(),
-                                                        )
-                                                        .child(dot())
-                                                    })
-                                                    .child(
-                                                        Label::new(id.clone())
-                                                            .size(LabelSize::Small)
-                                                            .color(Color::Muted)
-                                                            .flex_none(),
-                                                    ),
-                                            )
-                                        },
-                                    )
-                                    .tooltip(Tooltip::text(tooltip))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.focus.focus(window, cx);
-                                        let filtered = this.history.filtered.is_some();
-                                        if let Some(root) = this.selected_root.as_deref()
-                                            && let Some(history) =
-                                                this.history.state_mut(root, filtered)
-                                        {
-                                            history.selected = (!expanded).then_some(revision);
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(expanded, |row| {
-                                row.child(v_flex().min_w_0().children(
-                                    entry.paths.iter().enumerate().map(|(index, changed)| {
-                                        let path = &changed.path;
-                                        let action = &changed.action;
-                                        let diffable = changed.kind != "dir"
-                                            && matches!(action.as_str(), "A" | "D" | "M" | "R");
-                                        h_flex()
-                                            .id(("svn-history-change", index))
-                                            .h(rems(1.75))
-                                            .w_full()
-                                            .min_w_0()
-                                            .gap_1p5()
-                                            .pl_6()
-                                            .pr_2()
-                                            .when(diffable && !self.busy, |row| {
-                                                row.cursor_pointer()
-                                                    .hover(move |row| row.bg(hover))
-                                                    .tooltip(Tooltip::text(path.clone()))
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        |_, window, _| window.prevent_default(),
-                                                    )
-                                                    .on_click(cx.listener({
-                                                        let path = path.clone();
-                                                        move |this, _, window, cx| {
-                                                            if let Some(root) =
-                                                                this.selected_root.clone()
-                                                            {
-                                                                this.open_revision(
-                                                                    root,
-                                                                    revision,
-                                                                    Some(path.clone()),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            }
-                                                        }
-                                                    }))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        list(list_state.clone(), cx.processor(Self::render_history_row))
+                            .size_full(),
+                    )
+                    .when(
+                        !self.busy && !history.failed && history.next_page().is_some(),
+                        {
+                            let list_state = list_state.clone();
+                            move |element| {
+                                element.on_children_prepainted(move |_, window, cx| {
+                                    if list_state.item_is_below_viewport(
+                                        list_state.item_count().saturating_sub(5),
+                                    ) != Some(false)
+                                    {
+                                        return;
+                                    }
+                                    let panel = panel.clone();
+                                    let root = root.clone();
+                                    let path = path.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        panel
+                                            .update(cx, |panel, cx| {
+                                                if !panel.busy
+                                                    && panel.history.visible
+                                                    && panel.selected_root.as_ref() == Some(&root)
+                                                    && panel
+                                                        .history
+                                                        .filtered
+                                                        .as_ref()
+                                                        .map(|(path, _)| path)
+                                                        == path.as_ref()
+                                                    && panel
+                                                        .history
+                                                        .active(&root)
+                                                        .is_some_and(History::can_auto_paginate)
+                                                {
+                                                    panel.load_visible_history(
+                                                        true, false, window, cx,
+                                                    );
+                                                }
                                             })
-                                            .child(if changed.kind == "dir" {
-                                                Icon::new(IconName::Folder)
-                                                    .size(IconSize::Small)
-                                                    .color(Color::Muted)
-                                            } else {
-                                                panel_ui::status_icon(action)
-                                            })
-                                            .child(panel_ui::path_label(path, action == "D"))
-                                    }),
-                                ))
-                            })
-                    }),
+                                            .log_err();
+                                    });
+                                })
+                            }
+                        },
+                    )
+                    .vertical_scrollbar_for(&list_state, window, cx),
             )
-            .when(history.next_before.is_some(), |panel| {
-                panel.child(
-                    div().px_2().py_2().child(
-                        Button::new("svn-more-history", t!("Next"))
-                            .disabled(self.busy || history.next_page().is_none())
-                            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.load_history(true, window, cx)
-                            })),
-                    ),
-                )
+            .when(
+                history.next_before.is_some() && (history.loading.is_some() || history.failed),
+                |panel| {
+                    let loading = history.loading.is_some();
+                    panel.child(
+                        h_flex()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .child(
+                                Label::new(if loading {
+                                    t!("Loading Commit History…")
+                                } else {
+                                    t!("Failed to load commit history")
+                                })
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            )
+                            .when(!loading, |row| {
+                                row.child(
+                                    Button::new("svn-retry-history", t!("Retry"))
+                                        .disabled(self.busy || history.next_page().is_none())
+                                        .on_click(cx.listener(|panel, _, window, cx| {
+                                            panel.load_history(true, window, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    fn render_history_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(history) = self
+            .selected_root
+            .as_deref()
+            .and_then(|root| self.history.active(root))
+        else {
+            return gpui::Empty.into_any_element();
+        };
+        let Some(row) = history.panel.rows.get(index).copied() else {
+            return gpui::Empty.into_any_element();
+        };
+        let revision = row.revision;
+        let Ok(entry_index) = history
+            .entries
+            .binary_search_by(|entry| revision.cmp(&entry.revision))
+        else {
+            return gpui::Empty.into_any_element();
+        };
+        let entry = &history.entries[entry_index];
+        let colors = cx.theme().colors();
+        let hover = colors.element_hover;
+        let selected = colors.element_selected;
+        let focus = colors.panel_focused_border;
+        let focused = history.panel.focused == Some(row) && self.focus.is_focused(window);
+        if let Some(path_index) = row.path {
+            let Some(changed) = entry.paths.get(path_index) else {
+                return gpui::Empty.into_any_element();
+            };
+            let action = &changed.action;
+            let diffable =
+                changed.kind != "dir" && matches!(action.as_str(), "A" | "D" | "M" | "R");
+            return h_flex()
+                .id(("svn-history-change", path_index))
+                .h(rems(1.75))
+                .w_full()
+                .min_w_0()
+                .gap_1p5()
+                .pl_6()
+                .pr_2()
+                .border_1()
+                .border_color(if focused {
+                    focus
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(focused, |row| row.bg(selected))
+                .when(diffable && !self.busy, |element| {
+                    element
+                        .cursor_pointer()
+                        .hover(move |row| row.bg(hover))
+                        .tooltip(Tooltip::text(changed.path.clone()))
+                        .on_click(cx.listener(move |panel, _, window, cx| {
+                            panel.focus.focus(window, cx);
+                            panel.activate_history_row(row, window, cx);
+                        }))
+                })
+                .child(if changed.kind == "dir" {
+                    Icon::new(IconName::Folder)
+                        .size(IconSize::Small)
+                        .color(Color::Muted)
+                } else {
+                    panel_ui::status_icon(action)
+                })
+                .child(panel_ui::path_label(&changed.path, action == "D"))
+                .into_any_element();
+        }
+        let first = entry_index == 0;
+        let last = entry_index + 1 == history.entries.len();
+        let expanded = history.panel.expanded.contains(&revision);
+        let graph = self.view_options.history_graph;
+        let accent = colors.text_accent;
+        let background = colors.panel_background;
+        let now = time::OffsetDateTime::now_utc();
+        let dot = || {
+            Label::new("•")
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .alpha(0.5)
+                .flex_none()
+        };
+        let subject = entry.message.lines().next().unwrap_or_default().to_owned();
+        let age = time::OffsetDateTime::parse(
+            &entry.date,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map(|date| {
+            time_format::format_local_timestamp(date, now, time_format::TimestampFormat::Relative)
+        })
+        .unwrap_or_default();
+        let id = format!("r{revision}");
+        let tooltip = [
+            id.as_str(),
+            entry.author.as_str(),
+            entry.date.as_str(),
+            entry.message.as_str(),
+        ]
+        .join("\n");
+        v_flex()
+            .id(("svn-revision", revision as usize))
+            .w_full()
+            .min_w_0()
+            .px_2()
+            .when(!graph, |row| row.py_1().gap_0p5())
+            .cursor_pointer()
+            .border_1()
+            .border_color(if focused {
+                focus
+            } else {
+                gpui::transparent_black()
             })
+            .hover(move |row| row.bg(hover))
+            .when(expanded || focused, |row| row.bg(selected))
+            .when_else(
+                graph,
+                |row| {
+                    row.child(
+                        h_flex()
+                            .h(rems(1.75))
+                            .w_full()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(rems(0.9))
+                                    .h_full()
+                                    .flex_none()
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(rems(0.4))
+                                            .top(if first { rems(0.875) } else { rems(0.) })
+                                            .bottom(if last || expanded {
+                                                rems(0.875)
+                                            } else {
+                                                rems(0.)
+                                            })
+                                            .w(px(1.))
+                                            .bg(accent.opacity(0.65)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top(rems(0.625))
+                                            .left(rems(0.18))
+                                            .size(rems(0.5))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(accent)
+                                            .bg(background),
+                                    ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Label::new(subject.clone())
+                                        .size(LabelSize::Small)
+                                        .truncate(),
+                                ),
+                            )
+                            .child(
+                                Label::new(id.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .flex_none(),
+                            ),
+                    )
+                },
+                |row| {
+                    row.child(Label::new(subject.clone()).truncate()).child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::Person)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .when(!entry.author.is_empty(), |row| {
+                                row.child(
+                                    Label::new(entry.author.clone())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                                .child(dot())
+                            })
+                            .when(!age.is_empty(), |row| {
+                                row.child(
+                                    Label::new(age)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .flex_none(),
+                                )
+                                .child(dot())
+                            })
+                            .child(
+                                Label::new(id.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .flex_none(),
+                            ),
+                    )
+                },
+            )
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(cx.listener(move |panel, _, window, cx| {
+                panel.focus.focus(window, cx);
+                panel.activate_history_row(row, window, cx);
+            }))
             .into_any_element()
     }
 }

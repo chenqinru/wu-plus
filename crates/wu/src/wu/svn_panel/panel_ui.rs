@@ -962,6 +962,7 @@ impl SvnPanel {
         };
         let multiple = rows.len() > 1;
         let panel = cx.weak_entity();
+        let branch_panel = panel.clone();
         let active = repo.root.clone();
         let branch = repo.short_branch();
         let repository_label = repo.location.clone().unwrap_or_else(|| repo.name.clone());
@@ -1000,23 +1001,41 @@ impl SvnPanel {
                     RepositoryPicker::new(rows.clone(), active.clone(), panel.clone(), window, cx)
                 }))
             });
-        let branch_picker = Button::new("svn-branch", branch)
-            .size(ButtonSize::None)
-            .label_size(LabelSize::Small)
-            .truncate(true)
-            .disabled(self.busy || self.client.is_none())
-            .tooltip(Tooltip::text(branch_tooltip))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if this.selected_root.as_ref() == Some(&copy.root) {
-                    this.run(
-                        "read",
-                        json!({"operation":"switch_targets"}),
-                        Output::BranchPicker,
+        let branch_picker = PopoverMenu::new("svn-branch-picker")
+            .trigger_with_tooltip(
+                Button::new("svn-branch", branch)
+                    .size(ButtonSize::None)
+                    .label_size(LabelSize::Small)
+                    .truncate(true)
+                    .disabled(self.busy || self.client.is_none()),
+                Tooltip::text(branch_tooltip),
+            )
+            .anchor(anchor)
+            .offset(offset)
+            .menu(move |window, cx| {
+                let (client, params) = branch_panel
+                    .read_with(cx, |panel, _| {
+                        let repo = panel.repo()?;
+                        if panel.busy || repo.copy.root != copy.root || repo.copy.url != copy.url {
+                            return None;
+                        }
+                        let client = panel.client.clone()?;
+                        let params =
+                            panel.repository_params(&copy.root, json!({"operation":"switch_targets"}));
+                        Some((client, params))
+                    })
+                    .ok()??;
+                Some(cx.new(|cx| {
+                    branch_picker::BranchPicker::new(
+                        branch_panel.clone(),
+                        copy.clone(),
+                        client,
+                        params,
                         window,
                         cx,
-                    );
-                }
-            }));
+                    )
+                }))
+            });
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1683,37 +1702,6 @@ impl SvnPanel {
             .collect()
     }
 
-    pub(super) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || self.commit_generation.is_some() {
-            return;
-        }
-        let Some(repo) = self.repo() else { return };
-        let paths = self.commit_selection();
-        let message = self.commit_editor.read(cx).text(cx);
-        if paths.is_empty() || message.trim().is_empty() {
-            return;
-        }
-        let mut detail = format!("{}\n{}", repo.copy.root.display(), paths.join("\n"));
-        if repo.entries.iter().any(|entry| {
-            paths.contains(&entry.path)
-                && (entry.copied || matches!(entry.item.as_str(), "deleted" | "replaced"))
-        }) {
-            detail.push('\n');
-            detail.push_str(&t!(
-                "Directory copies, replacements, and deletions may affect the entire subtree."
-            ));
-        }
-        self.confirm(
-            t!("SVN Commit"),
-            detail,
-            "write",
-            json!({"operation":"commit","paths":paths,"message":message}),
-            Output::Commit,
-            window,
-            cx,
-        );
-    }
-
     fn update_actions(&self, ready: bool, cx: &Context<Self>) -> AnyElement {
         use form::Kind;
         let panel = cx.weak_entity();
@@ -1936,6 +1924,7 @@ impl Render for SvnPanel {
             .track_focus(&self.focus)
             .key_context("SvnPanel")
             .on_key_down(cx.listener(Self::change_keys))
+            .on_key_down(cx.listener(Self::history_keys))
             .when(!self.enabled, |panel| {
                 panel.child(panel_placeholder(
                     t!("Install the Subversion extension to enable this panel."),
@@ -1953,6 +1942,9 @@ impl Render for SvnPanel {
                             if let Some(placeholder) = self.workspace_placeholder(cx) {
                                 return panel.child(placeholder);
                             }
+                            if self.history.visible {
+                                return panel.child(self.render_history(window, cx));
+                            }
                             panel.child(
                                 div()
                                     .relative()
@@ -1968,11 +1960,7 @@ impl Render for SvnPanel {
                                             .track_scroll(&self.scroll)
                                             .overflow_y_scroll()
                                             .when(self.repo().is_some(), |element| {
-                                                if self.history.visible {
-                                                    element.child(self.render_history(window, cx))
-                                                } else {
-                                                    element.child(self.render_changes(window, cx))
-                                                }
+                                                element.child(self.render_changes(window, cx))
                                             }),
                                     )
                                     .vertical_scrollbar_for(&self.scroll, window, cx),

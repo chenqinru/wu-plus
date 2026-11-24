@@ -1,19 +1,20 @@
-use gpui::{App, Context, PromptButton, WeakEntity, Window};
+use gpui::{App, AsyncWindowContext, Context, PromptButton, WeakEntity, Window};
 use i18n::t;
 use notifications::status_toast::StatusToast;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
 use workspace::{self, Workspace};
+
+pub type RepositoryOpened =
+    Arc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static>;
 
 pub fn clone_and_open(
     repo_url: SharedString,
     workspace: WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
-    on_success: Arc<
-        dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
-    >,
+    on_success: RepositoryOpened,
 ) {
     let destination_prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
         files: false,
@@ -25,7 +26,7 @@ pub fn clone_and_open(
     window
         .spawn(cx, async move |cx| {
             let mut paths = destination_prompt.await.ok()?.ok()??;
-            let mut destination_dir = paths.pop()?;
+            let destination_dir = paths.pop()?;
 
             let repo_name = repo_url
                 .split('/')
@@ -62,45 +63,94 @@ pub fn clone_and_open(
                 return None;
             }
 
-            let has_worktrees = workspace
-                .read_with(cx, |workspace, cx| {
-                    workspace.project().read(cx).worktrees(cx).next().is_some()
+            open_checked_out_repository(
+                workspace,
+                destination_dir.join(&repo_name),
+                t!("Git Clone: {name}", name = repo_name),
+                on_success,
+                cx,
+            )
+            .await
+        })
+        .detach();
+}
+
+pub async fn open_checked_out_repository(
+    workspace: WeakEntity<Workspace>,
+    destination: PathBuf,
+    title: SharedString,
+    on_success: RepositoryOpened,
+    cx: &mut AsyncWindowContext,
+) -> Option<()> {
+    let has_worktrees = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).worktrees(cx).next().is_some()
+        })
+        .ok()?;
+
+    let prompt_answer = if has_worktrees {
+        cx.update(|window, cx| {
+            window.prompt(
+                gpui::PromptLevel::Info,
+                &title,
+                None,
+                &[
+                    PromptButton::new(t!("Add repo to project")),
+                    PromptButton::new(t!("Open repo in new project")),
+                ],
+                cx,
+            )
+        })
+        .ok()?
+        .await
+        .ok()?
+    } else {
+        // Don't ask if project is empty
+        0
+    };
+
+    match prompt_answer {
+        0 => {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    let create_task = workspace.project().update(cx, |project, cx| {
+                        project.create_worktree(destination.as_path(), true, cx)
+                    });
+
+                    let workspace_weak = cx.weak_entity();
+                    let on_success = on_success.clone();
+                    cx.spawn_in(window, async move |_window, cx| {
+                        if create_task.await.log_err().is_some() {
+                            workspace_weak
+                                .update_in(cx, |workspace, window, cx| {
+                                    (on_success)(workspace, window, cx);
+                                })
+                                .ok();
+                        }
+                    })
+                    .detach();
                 })
                 .ok()?;
+        }
+        1 => {
+            workspace
+                .update(cx, move |workspace, cx| {
+                    let app_state = workspace.app_state().clone();
+                    let destination_path = destination.clone();
+                    let on_success = on_success.clone();
 
-            let prompt_answer = if has_worktrees {
-                cx.update(|window, cx| {
-                    window.prompt(
-                        gpui::PromptLevel::Info,
-                        &t!("Git Clone: {name}", name = repo_name),
-                        None,
-                        &[
-                            PromptButton::new(t!("Add repo to project")),
-                            PromptButton::new(t!("Open repo in new project")),
-                        ],
+                    workspace::open_new(
+                        Default::default(),
+                        app_state,
                         cx,
-                    )
-                })
-                .ok()?
-                .await
-                .ok()?
-            } else {
-                // Don't ask if project is empty
-                0
-            };
+                        move |workspace, window, cx| {
+                            cx.activate(true);
 
-            destination_dir.push(&repo_name);
-
-            match prompt_answer {
-                0 => {
-                    workspace
-                        .update_in(cx, |workspace, window, cx| {
                             let create_task = workspace.project().update(cx, |project, cx| {
-                                project.create_worktree(destination_dir.as_path(), true, cx)
+                                project.create_worktree(destination_path.as_path(), true, cx)
                             });
 
                             let workspace_weak = cx.weak_entity();
-                            let on_success = on_success.clone();
                             cx.spawn_in(window, async move |_window, cx| {
                                 if create_task.await.log_err().is_some() {
                                     workspace_weak
@@ -111,53 +161,13 @@ pub fn clone_and_open(
                                 }
                             })
                             .detach();
-                        })
-                        .ok()?;
-                }
-                1 => {
-                    workspace
-                        .update(cx, move |workspace, cx| {
-                            let app_state = workspace.app_state().clone();
-                            let destination_path = destination_dir.clone();
-                            let on_success = on_success.clone();
-
-                            workspace::open_new(
-                                Default::default(),
-                                app_state,
-                                cx,
-                                move |workspace, window, cx| {
-                                    cx.activate(true);
-
-                                    let create_task =
-                                        workspace.project().update(cx, |project, cx| {
-                                            project.create_worktree(
-                                                destination_path.as_path(),
-                                                true,
-                                                cx,
-                                            )
-                                        });
-
-                                    let workspace_weak = cx.weak_entity();
-                                    cx.spawn_in(window, async move |_window, cx| {
-                                        if create_task.await.log_err().is_some() {
-                                            workspace_weak
-                                                .update_in(cx, |workspace, window, cx| {
-                                                    (on_success)(workspace, window, cx);
-                                                })
-                                                .ok();
-                                        }
-                                    })
-                                    .detach();
-                                },
-                            )
-                            .detach();
-                        })
-                        .ok();
-                }
-                _ => {}
-            }
-
-            Some(())
-        })
-        .detach();
+                        },
+                    )
+                    .detach();
+                })
+                .ok();
+        }
+        _ => {}
+    }
+    Some(())
 }

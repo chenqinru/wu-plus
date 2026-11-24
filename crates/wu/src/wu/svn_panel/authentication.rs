@@ -9,7 +9,7 @@ pub(super) async fn request(
     method: &str,
     params: Value,
     panel: &WeakEntity<SvnPanel>,
-    current: impl Fn(&SvnPanel) -> bool,
+    current: impl Fn(&SvnPanel, &App) -> bool,
     cx: &mut AsyncWindowContext,
 ) -> Result<Value, rpc::Error> {
     let result = client.request(id, method, params.clone()).await;
@@ -26,7 +26,7 @@ pub(super) async fn retry(
     mut params: Value,
     error: rpc::Error,
     panel: &WeakEntity<SvnPanel>,
-    current: impl Fn(&SvnPanel) -> bool,
+    current: impl Fn(&SvnPanel, &App) -> bool,
     cx: &mut AsyncWindowContext,
 ) -> Result<Value, rpc::Error> {
     let writes = method == "write" && params["dry_run"].as_bool() != Some(true);
@@ -40,12 +40,12 @@ pub(super) async fn retry(
     }
 
     let root = params["root"].as_str().map(PathBuf::from);
-    let still_current = |panel: &SvnPanel, _: &App| {
-        current(panel)
-            && panel
-                .client
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, client))
+    let still_current = |panel: &SvnPanel, cx: &App| {
+        let active_client = panel
+            .client
+            .as_ref()
+            .or_else(|| panel.connecting.as_ref()?.peek()?.as_ref().ok());
+        current(panel, cx) && active_client.is_some_and(|active| Arc::ptr_eq(active, client))
     };
     let workspace = panel
         .read_with(cx, |panel, app| {
@@ -72,6 +72,7 @@ pub(super) async fn retry(
         operation_label(params["operation"].as_str())
     };
     let (sender, receiver) = oneshot::channel();
+    let (_request_lifetime, request_ended) = oneshot::channel();
     let dry_run = method == "write" && !writes;
     let opened = cx
         .update(|window, cx| {
@@ -83,6 +84,7 @@ pub(super) async fn retry(
                         };
                         let modal = cx.new(|cx| {
                             CredentialsModal::new(title, target, username, true, sender, window, cx)
+                                .dismiss_when_request_ends(request_ended, cx)
                         });
                         form.update(cx, |form, cx| form.show_authentication(modal, window, cx));
                     } else {
@@ -91,6 +93,7 @@ pub(super) async fn retry(
                         }
                         workspace.toggle_modal(window, cx, |window, cx| {
                             CredentialsModal::new(title, target, username, true, sender, window, cx)
+                                .dismiss_when_request_ends(request_ended, cx)
                         });
                     }
                     true
@@ -117,11 +120,8 @@ pub(super) async fn retry(
         .map_err(|error| operation_error(error, writes))?;
     if let Some(root) = root.or_else(|| result["destination"].as_str().map(PathBuf::from)) {
         panel
-            .update(cx, |panel, _| {
-                if panel
-                    .client
-                    .as_ref()
-                    .is_some_and(|active| Arc::ptr_eq(active, client))
+            .update(cx, |panel, cx| {
+                if still_current(panel, cx)
                     && repository_url.as_ref().is_none_or(|url| {
                         panel
                             .repos
@@ -272,6 +272,7 @@ pub(super) struct CredentialsModal {
     remember: bool,
     missing_username: bool,
     sender: Option<oneshot::Sender<Option<Credentials>>>,
+    _request_lifetime: Option<Task<()>>,
 }
 
 impl CredentialsModal {
@@ -305,7 +306,20 @@ impl CredentialsModal {
             remember: false,
             missing_username: false,
             sender: Some(sender),
+            _request_lifetime: None,
         }
+    }
+
+    fn dismiss_when_request_ends(
+        mut self,
+        request_ended: oneshot::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        self._request_lifetime = Some(cx.spawn(async move |modal, cx| {
+            request_ended.await.ok();
+            modal.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+        }));
+        self
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {

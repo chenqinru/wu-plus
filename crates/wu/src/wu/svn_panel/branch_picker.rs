@@ -2,18 +2,20 @@ use super::*;
 use ui::ListItemSpacing;
 
 #[derive(Deserialize)]
-pub(super) struct Target {
+struct Target {
     path: String,
     url: String,
 }
 
 #[derive(Deserialize)]
-pub(super) struct Targets {
-    pub(super) targets: Vec<Target>,
+struct Targets {
+    targets: Vec<Target>,
+    warning: Option<String>,
 }
 
 pub(super) struct BranchPicker {
     picker: Entity<picker::Picker<Delegate>>,
+    request: Option<(Arc<rpc::Client>, u64, Task<()>)>,
 }
 
 struct Delegate {
@@ -24,35 +26,132 @@ struct Delegate {
     targets: Vec<Target>,
     matches: Vec<usize>,
     selected: usize,
+    loading: bool,
+    failed: bool,
 }
 
 impl BranchPicker {
     pub(super) fn new(
         panel: WeakEntity<SvnPanel>,
         copy: Copy,
-        targets: Vec<Target>,
+        client: Arc<rpc::Client>,
+        params: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let delegate = Delegate {
             parent: cx.weak_entity(),
-            panel,
-            root: copy.root,
-            current_url: copy.url,
-            matches: (0..targets.len()).collect(),
-            targets,
+            panel: panel.clone(),
+            root: copy.root.clone(),
+            current_url: copy.url.clone(),
+            matches: Vec::new(),
+            targets: Vec::new(),
             selected: 0,
+            loading: true,
+            failed: false,
         };
         let picker = cx.new(|cx| {
             picker::Picker::uniform_list(delegate, window, cx)
                 .initial_width(rems(20.))
                 .show_scrollbar(true)
+                .popover()
         });
-        Self { picker }
+        let mut request = Some((panel, copy, client, params));
+        // The authentication dialog must be able to restore focus to the open picker.
+        cx.on_focus(&picker.focus_handle(cx), window, move |this, window, cx| {
+            if let Some((panel, copy, client, params)) = request.take() {
+                this.load(panel, copy, client, params, window, cx);
+            }
+        })
+        .detach();
+        Self {
+            picker,
+            request: None,
+        }
+    }
+
+    fn load(
+        &mut self,
+        panel: WeakEntity<SvnPanel>,
+        copy: Copy,
+        client: Arc<rpc::Client>,
+        params: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = client.next_id();
+        let request_client = client.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let current = |panel: &SvnPanel, _: &App| {
+                !panel.busy
+                    && panel.repo().is_some_and(|repo| {
+                        repo.copy.root == copy.root && repo.copy.url == copy.url
+                    })
+            };
+            let result =
+                authentication::request(&request_client, id, "read", params, &panel, current, cx)
+                    .await
+                    .and_then(|value| {
+                        serde_json::from_value::<Targets>(value).map_err(decode_error)
+                    });
+            this.update_in(cx, |this, window, cx| {
+                this.request = None;
+                let targets = match result {
+                    Ok(result) => {
+                        if let Some(warning) = result.warning {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    if current(panel, cx) {
+                                        panel.show_operation_result(
+                                            None,
+                                            String::new(),
+                                            Some(warning),
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .log_err();
+                        }
+                        Some(result.targets)
+                    }
+                    Err(error) => {
+                        if error.kind != "cancelled" {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    if current(panel, cx) {
+                                        panel.set_error(
+                                            t!("Switch Branch"),
+                                            error,
+                                            Some(copy.url.clone()),
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .log_err();
+                        }
+                        None
+                    }
+                };
+                this.picker.update(cx, |picker, cx| {
+                    picker.delegate.loading = false;
+                    picker.delegate.failed = targets.is_none();
+                    picker.delegate.targets = targets.unwrap_or_default();
+                    picker.update_matches(picker.query(cx), window, cx);
+                });
+            })
+            .log_err();
+        });
+        self.request = Some((client, id, task));
     }
 }
 
-impl workspace::ModalView for BranchPicker {}
+impl Drop for BranchPicker {
+    fn drop(&mut self) {
+        if let Some((client, id, _)) = &self.request {
+            client.cancel(*id);
+        }
+    }
+}
 
 impl EventEmitter<gpui::DismissEvent> for BranchPicker {}
 
@@ -63,8 +162,8 @@ impl Focusable for BranchPicker {
 }
 
 impl Render for BranchPicker {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().elevation_3(cx).child(self.picker.clone())
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.picker.clone()
     }
 }
 
@@ -102,7 +201,28 @@ impl picker::PickerDelegate for Delegate {
     }
 
     fn no_matches_text(&self, _: &mut Window, _: &mut App) -> Option<SharedString> {
-        Some(t!("No Results"))
+        Some(if self.loading {
+            t!("Loading")
+        } else if self.failed {
+            t!("Error loading: {error}", error = t!("Branches"))
+        } else {
+            t!("No Results")
+        })
+    }
+
+    fn has_another_open_menu(&self, _: &Window, cx: &App) -> bool {
+        self.panel
+            .read_with(cx, |panel, cx| {
+                panel
+                    .workspace
+                    .read_with(cx, |workspace, cx| {
+                        workspace
+                            .active_modal::<authentication::CredentialsModal>(cx)
+                            .is_some()
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
     }
 
     fn update_matches(

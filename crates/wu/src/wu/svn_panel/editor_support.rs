@@ -33,7 +33,7 @@ struct FileHistory {
     locate: Option<Task<()>>,
     read_base: Option<Task<()>>,
     recalculate: Option<Task<()>>,
-    read_blame: Option<Task<()>>,
+    read_blame: Option<(bool, Task<()>)>,
     _buffer_subscription: Subscription,
 }
 
@@ -424,44 +424,76 @@ impl FileHistory {
             return;
         };
         self.wants_blame = true;
-        let auth = self
-            .panel
-            .read_with(cx, |panel, _| {
-                panel
-                    .credentials
-                    .get(&source.root)
-                    .map(|credentials| json!(credentials))
-            })
-            .ok()
-            .flatten();
-        let mut params = json!({
-            "operation":"blame", "root":source.root, "path":source.path, "editor":true,
-        });
-        if let Some(auth) = auth {
-            params["auth"] = auth;
+        if self
+            .read_blame
+            .as_ref()
+            .is_some_and(|(interactive, _)| *interactive)
+        {
+            return;
         }
-        self.read_blame = Some(cx.spawn_in(window, async move |state, cx| {
-            if !user_triggered {
+        let panel = self.panel.clone();
+        let Ok(params) = panel.read_with(cx, |panel, _| {
+            panel.repository_params(
+                &source.root,
+                json!({
+                    "operation": "blame", "path": source.path, "editor": true,
+                }),
+            )
+        }) else {
+            return;
+        };
+        let task = cx.spawn_in(window, async move |state, cx| {
+            let id = source.client.next_id();
+            let reply = if user_triggered {
+                authentication::request(
+                    &source.client,
+                    id,
+                    "read",
+                    params,
+                    &panel,
+                    |panel, cx| {
+                        state
+                            .read_with(cx, |state, cx| {
+                                panel.provider.as_ref() == Some(&state.provider)
+                                    && state.source.as_ref().is_some_and(|current| {
+                                        current.root == source.root && current.path == source.path
+                                    })
+                                    && state
+                                        .editor
+                                        .read_with(cx, |editor, _| {
+                                            editor.git_blame_inline_enabled()
+                                                || editor.show_git_blame_gutter()
+                                        })
+                                        .unwrap_or(false)
+                                    && panel
+                                        .workspace
+                                        .read_with(cx, |workspace, cx| {
+                                            workspace.active_item(cx).is_some_and(|item| {
+                                                item.item_id() == state.editor.entity_id()
+                                            })
+                                        })
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    },
+                    cx,
+                )
+                .await
+            } else {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
-            }
-            let reply = cx
-                .background_spawn(async move {
-                    source
-                        .client
-                        .request(source.client.next_id(), "read", params)
-                        .await
-                })
-                .await;
+                source.client.request(id, "read", params).await
+            };
             state
                 .update_in(cx, |state, window, cx| {
+                    state.read_blame = None;
                     let data = match reply {
                         Ok(reply) => {
                             serde_json::from_value::<BlameData>(reply["blame"].clone()).ok()
                         }
                         Err(error) => {
-                            if user_triggered {
+                            if user_triggered && error.kind != "cancelled" {
                                 let message = error.message;
                                 if let Some(project) = state
                                     .editor
@@ -514,7 +546,8 @@ impl FileHistory {
                         .ok();
                 })
                 .ok();
-        }));
+        });
+        self.read_blame = Some((user_triggered, task));
     }
 }
 

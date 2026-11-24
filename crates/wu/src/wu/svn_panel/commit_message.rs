@@ -11,7 +11,146 @@ pub(super) struct Generation {
     _task: Task<()>,
 }
 
+const COMMIT_DRAFT_SAVE_DELAY: Duration = Duration::from_millis(250);
+
 impl SvnPanel {
+    pub(super) fn save_commit_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.capture_commit_draft(cx) || self.commit_draft_key.is_none() {
+            return;
+        }
+        self.pending_commit_draft_save = Some(cx.spawn(async move |panel, cx| {
+            cx.background_executor()
+                .timer(COMMIT_DRAFT_SAVE_DELAY)
+                .await;
+            panel
+                .update(cx, |panel, cx| {
+                    panel.pending_commit_draft_save = None;
+                    panel.write_commit_drafts(cx);
+                })
+                .log_err();
+        }));
+    }
+
+    fn capture_commit_draft(&mut self, cx: &App) -> bool {
+        if self.commit_draft_key.is_none() {
+            self.commit_draft_key = self
+                .workspace
+                .read_with(cx, |workspace, _| {
+                    workspace
+                        .database_id()
+                        .map(|id| i64::from(id).to_string())
+                        .or_else(|| workspace.session_id())
+                        .map(|id| format!("svn-commit-drafts-{id}"))
+                })
+                .ok()
+                .flatten();
+            if let Some(key) = &self.commit_draft_key
+                && let Some(saved) = db::kvp::KeyValueStore::global(cx)
+                    .read_kvp(key)
+                    .log_err()
+                    .flatten()
+                && let Some(mut drafts) =
+                    serde_json::from_str::<BTreeMap<PathBuf, String>>(&saved).log_err()
+            {
+                drafts.append(&mut self.commit_drafts);
+                self.commit_drafts = drafts;
+            }
+        }
+
+        let Some(root) = &self.selected_root else {
+            return false;
+        };
+        let message = self.commit_editor.read(cx).text(cx);
+        if message.trim().is_empty() {
+            self.commit_drafts.remove(root).is_some()
+        } else if self.commit_drafts.get(root) == Some(&message) {
+            false
+        } else {
+            self.commit_drafts.insert(root.clone(), message);
+            true
+        }
+    }
+
+    fn write_commit_drafts(&mut self, cx: &App) {
+        let Some(key) = self.commit_draft_key.clone() else {
+            return;
+        };
+        let Some(value) = serde_json::to_string(&self.commit_drafts).log_err() else {
+            return;
+        };
+        let db = db::kvp::KeyValueStore::global(cx);
+        let previous = self.commit_draft_write.take();
+        self.commit_draft_write = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            db.write_kvp(key, value).await.log_err();
+        }));
+    }
+
+    pub(super) fn flush_commit_drafts(&mut self, cx: &App) -> Option<Task<()>> {
+        let changed = self.capture_commit_draft(cx);
+        if self.pending_commit_draft_save.take().is_some() || changed {
+            self.write_commit_drafts(cx);
+        }
+        self.commit_draft_write.take()
+    }
+
+    pub(super) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((scope, params)) = self.prepare_commit(cx) else {
+            return;
+        };
+        let mut detail = format!(
+            "{}\n{}\n{}",
+            scope.url,
+            scope.root.display(),
+            scope.paths.join("\n")
+        );
+        if scope.affects_subtree {
+            detail.push('\n');
+            detail.push_str(&t!(
+                "Directory copies, replacements, and deletions may affect the entire subtree."
+            ));
+        }
+        self.confirm(
+            t!("SVN Commit"),
+            detail,
+            "write",
+            params,
+            Output::Commit,
+            window,
+            cx,
+        );
+    }
+
+    fn commit_scope(&self) -> Option<CommitScope> {
+        let repo = self.repo()?;
+        let paths = self.commit_selection();
+        let affects_subtree = repo.entries.iter().any(|entry| {
+            paths.contains(&entry.path)
+                && (entry.copied || matches!(entry.item.as_str(), "deleted" | "replaced"))
+        });
+        Some(CommitScope {
+            root: repo.copy.root.clone(),
+            url: repo.copy.url.clone(),
+            paths,
+            affects_subtree,
+        })
+    }
+
+    fn prepare_commit(&self, cx: &App) -> Option<(CommitScope, Value)> {
+        if self.busy || self.commit_generation.is_some() {
+            return None;
+        }
+        let scope = self.commit_scope()?;
+        let message = self.commit_editor.read(cx).text(cx);
+        if scope.paths.is_empty() || message.trim().is_empty() {
+            return None;
+        }
+        let params = json!({"operation":"commit","paths":scope.paths,"message":message});
+        Some((scope, params))
+    }
+
     pub(super) fn generate_commit_message_action(
         &mut self,
         _: &GenerateCommitMessage,
@@ -157,9 +296,11 @@ impl SvnPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.selected_root.clone() else {
+        let Some(repo) = self.repo() else {
             return;
         };
+        let root = repo.copy.root.clone();
+        let url = repo.copy.url.clone();
         let Some(buffer) = self.commit_editor.read(cx).buffer().read(cx).as_singleton() else {
             return;
         };
@@ -169,7 +310,7 @@ impl SvnPanel {
         window.defer(cx, move |window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    CommitDraftModal::new(panel, root, buffer, generating, window, cx)
+                    CommitDraftModal::new(panel, root, url, buffer, generating, window, cx)
                 });
             });
         });
@@ -266,9 +407,17 @@ impl SvnPanel {
     }
 }
 
+struct CommitScope {
+    root: PathBuf,
+    url: String,
+    paths: Vec<String>,
+    affects_subtree: bool,
+}
+
 struct CommitDraftModal {
     panel: WeakEntity<SvnPanel>,
     root: PathBuf,
+    url: String,
     editor: Entity<Editor>,
     _panel_subscription: Subscription,
 }
@@ -277,6 +426,7 @@ impl CommitDraftModal {
     fn new(
         panel: Entity<SvnPanel>,
         root: PathBuf,
+        url: String,
         buffer: Entity<language::Buffer>,
         generating: bool,
         window: &mut Window,
@@ -299,7 +449,7 @@ impl CommitDraftModal {
         });
         let subscription = cx.observe(&panel, |modal, panel, cx| {
             let panel = panel.read(cx);
-            if panel.selected_root.as_ref() != Some(&modal.root) {
+            if !modal.matches_repository(panel) {
                 cx.emit(DismissEvent);
                 return;
             }
@@ -315,34 +465,38 @@ impl CommitDraftModal {
         Self {
             panel: panel.downgrade(),
             root,
+            url,
             editor,
             _panel_subscription: subscription,
         }
     }
 
+    fn matches_repository(&self, panel: &SvnPanel) -> bool {
+        panel
+            .repo()
+            .is_some_and(|repo| repo.copy.root == self.root && repo.copy.url == self.url)
+    }
+
     fn commit_from_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let can_commit = self
-            .panel
-            .read_with(cx, |panel, cx| {
-                panel.selected_root.as_ref() == Some(&self.root)
-                    && !panel.busy
-                    && panel.commit_generation.is_none()
-                    && !panel.commit_selection().is_empty()
-                    && !self.editor.read(cx).text(cx).trim().is_empty()
-            })
-            .unwrap_or(false);
-        if !can_commit {
+        let Ok(Some((scope, params))) = self.panel.read_with(cx, |panel, cx| {
+            self.matches_repository(panel)
+                .then(|| panel.prepare_commit(cx))
+                .flatten()
+        }) else {
             return;
-        }
+        };
         cx.emit(DismissEvent);
         let panel = self.panel.clone();
-        let root = self.root.clone();
         window.defer(cx, move |window, cx| {
-            let _ = panel.update(cx, |panel, cx| {
-                if panel.selected_root.as_ref() == Some(&root) {
-                    panel.commit(window, cx);
-                }
-            });
+            panel
+                .update(cx, |panel, cx| {
+                    if panel.repo().is_some_and(|repo| {
+                        repo.copy.root == scope.root && repo.copy.url == scope.url
+                    }) {
+                        panel.run("write", params, Output::Commit, window, cx);
+                    }
+                })
+                .log_err();
         });
     }
 }
@@ -360,12 +514,15 @@ impl workspace::ModalView for CommitDraftModal {}
 impl Render for CommitDraftModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = self.panel.clone();
-        let (controls, can_commit) = self
+        let (controls, scope, can_commit) = self
             .panel
             .read_with(cx, |panel, cx| {
+                let scope = panel
+                    .commit_scope()
+                    .filter(|_| self.matches_repository(panel));
                 let ready = !panel.busy
                     && panel.commit_generation.is_none()
-                    && !panel.commit_selection().is_empty()
+                    && scope.as_ref().is_some_and(|scope| !scope.paths.is_empty())
                     && !self.editor.read(cx).text(cx).trim().is_empty();
                 (
                     panel.commit_message_controls(
@@ -373,17 +530,18 @@ impl Render for CommitDraftModal {
                         self.editor.focus_handle(cx),
                         cx,
                     ),
+                    scope,
                     ready,
                 )
             })
-            .unwrap_or_else(|_| (gpui::Empty.into_any_element(), false));
+            .unwrap_or_else(|_| (gpui::Empty.into_any_element(), None, false));
         let border = cx.theme().colors().border_variant;
 
         v_flex()
             .id("svn-commit-draft-modal")
             .key_context("CommitEditor")
             .w(rems(36.))
-            .h(rems(18.))
+            .h(rems(24.))
             .elevation_3(cx)
             .on_action(
                 cx.listener(move |_, _: &GenerateCommitMessage, window, cx| {
@@ -406,6 +564,21 @@ impl Render for CommitDraftModal {
                             .headline(t!("SVN Commit"))
                             .show_dismiss_button(true),
                     )
+                    .when_some(scope, |modal, scope| {
+                        modal.child(
+                            v_flex().gap_1().px_3().pb_2().min_w_0()
+                                .child(Label::new(scope.url).size(LabelSize::Small).truncate_middle())
+                                .child(Label::new(scope.root.to_string_lossy().into_owned()).size(LabelSize::Small).color(Color::Muted).truncate_middle())
+                                .child(Label::new(t!("Paths to commit ({count})", count = scope.paths.len())).size(LabelSize::Small))
+                                .child(
+                                    v_flex().id("svn-commit-paths").max_h(rems(4.5)).overflow_y_scroll()
+                                        .children(scope.paths.into_iter().map(|path| Label::new(path).size(LabelSize::Small).truncate_middle()))
+                                )
+                                .when(scope.affects_subtree, |section| {
+                                    section.child(Label::new(t!("Directory copies, replacements, and deletions may affect the entire subtree.")).size(LabelSize::Small).color(Color::Warning))
+                                })
+                        )
+                    })
                     .child(div().flex_1().min_h_0().px_3().child(self.editor.clone()))
                     .child(
                         h_flex()

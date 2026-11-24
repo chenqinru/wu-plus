@@ -400,10 +400,10 @@ impl SvnPanel {
             return;
         }
         self.view_options = options;
-        if previous.group != options.group
-            || previous.tree != options.tree
-            || previous.history_graph != options.history_graph
-        {
+        if previous.history_graph != options.history_graph {
+            self.history.remeasure();
+        }
+        if previous.group != options.group || previous.tree != options.tree {
             self.active_directory = None;
             self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         }
