@@ -26,6 +26,7 @@ impl PanelHistory {
         self.filtered = None;
         if let Some(history) = root.and_then(|root| self.repositories.get_mut(root)) {
             history.selected = None;
+            history.interactive = false;
         }
     }
 
@@ -364,11 +365,12 @@ impl SvnPanel {
                     Ok(page) => history.receive(page, append),
                     Err(error) => {
                         history.failed = true;
-                        if active && error.kind != "cancelled"
-                            && (error.kind != "authentication" || history.interactive)
-                        {
-                            let url = this.repo().map(|repo| repo.copy.url.clone());
-                            this.set_error(error, url, cx);
+                        if error.kind != "cancelled" {
+                            log::debug!("SVN history for {}: {}", root.display(), error.message);
+                            if active && history.interactive {
+                                let url = this.repo().map(|repo| repo.copy.url.clone());
+                                this.record_error(&error, url);
+                            }
                         }
                     }
                 }
@@ -461,9 +463,9 @@ impl SvnPanel {
             self.invalidate_repository_history(root);
             if self.selected_root.as_deref() == Some(root)
                 && self.history.visible
-                && self.history.filtered.is_some()
+                && let Some((path, _)) = &self.history.filtered
             {
-                self.load_history(false, window, cx);
+                self.load_panel_history(Some(path.clone()), None, false, false, window, cx);
             }
         }
         let Some(workspace) = self.workspace.upgrade() else {
@@ -1071,19 +1073,7 @@ impl LogView {
                 match result {
                     Ok(page) => this.history.receive(page, append),
                     Err(error) if error.kind == "cancelled" => {}
-                    Err(error) if this.history.entries.is_empty() => {
-                        this.error = Some(error.message)
-                    }
-                    Err(error) => {
-                        let _ = this.panel.update(cx, |panel, cx| {
-                            panel.show_output_status(
-                                t!("Failed to load commit history"),
-                                error.message,
-                                true,
-                                cx,
-                            );
-                        });
-                    }
+                    Err(error) => this.error = Some(error.message),
                 }
                 cx.notify();
             });
@@ -2025,7 +2015,20 @@ impl Render for LogView {
                                     };
                                     body.child(panel_ui::panel_placeholder(message, loading))
                                 } else {
-                                    body.child(div().flex_1().min_h_0().child(table))
+                                    body.when_some(self.error.clone(), |body, error| {
+                                        body.child(
+                                            h_flex()
+                                                .id("svn-log-error")
+                                                .px_2()
+                                                .py_1()
+                                                .tooltip(Tooltip::text(error))
+                                                .child(
+                                                    Label::new(t!("Failed to load commit history"))
+                                                        .color(Color::Error),
+                                                ),
+                                        )
+                                    })
+                                    .child(div().flex_1().min_h_0().child(table))
                                 }
                             })
                             .when(self.history.next_before.is_some(), |list| {

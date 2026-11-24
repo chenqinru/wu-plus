@@ -423,7 +423,7 @@ impl Form {
                             let output = if alternate {
                                 Output::MergePreview
                             } else {
-                                Output::Text
+                                Output::Change
                             };
                             ("write", "merge", output, !alternate)
                         }

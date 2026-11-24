@@ -273,14 +273,8 @@ impl SvnPanel {
                             this.open_log(&path, window, cx);
                         }
                         MenuAction::ShowOutput => {
-                            if let Some(output) = this.last_output.clone() {
-                                preview::text(
-                                    this.workspace.clone(),
-                                    t!("SVN Output"),
-                                    output,
-                                    window,
-                                    cx,
-                                );
+                            if let Some(output) = &this.last_output {
+                                Self::open_output(&this.workspace, output, window, cx);
                             }
                         }
                         MenuAction::SelectAll(checked) => {

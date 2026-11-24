@@ -67,7 +67,7 @@ pub(super) async fn retry(
         .unwrap_or_default()
         .to_owned();
     let title = if method == "status" {
-        t!("Remote Change")
+        t!("Check Remote Status")
     } else {
         operation_label(params["operation"].as_str())
     };
@@ -145,10 +145,10 @@ pub(super) async fn retry(
 
 fn operation_error(mut error: rpc::Error, writes: bool) -> rpc::Error {
     if writes && error.kind == "transport" {
-        error.message = t!(
+        let summary = t!(
             "SVN operation outcome is unknown. Refresh and verify the repository before retrying."
-        )
-        .to_string();
+        );
+        error.message = format!("{summary}\n\n{}", error.message);
     } else if error.kind == "authentication_before_write" {
         error.kind = "authentication".into();
     }
@@ -162,7 +162,7 @@ pub(super) fn cancelled() -> rpc::Error {
     }
 }
 
-fn operation_label(operation: Option<&str>) -> SharedString {
+pub(super) fn operation_label(operation: Option<&str>) -> SharedString {
     match operation {
         Some("commit") => t!("SVN Commit"),
         Some("update") => t!("SVN Update"),
@@ -178,7 +178,17 @@ fn operation_label(operation: Option<&str>) -> SharedString {
         Some("lock") => form::Kind::Lock.label(),
         Some("unlock") => t!("SVN Unlock"),
         Some("revision_review") => t!("SVN History"),
-        _ => t!("SVN Credentials"),
+        Some("worktree_diff") => t!("Working Copy Diff"),
+        Some("conflict" | "resolve") => t!("Resolve SVN Conflict"),
+        Some("add") => t!("SVN Add"),
+        Some("delete") => t!("SVN Delete"),
+        Some("move") => form::Kind::Move.label(),
+        Some("revert") => t!("SVN Revert"),
+        Some("cleanup") => t!("SVN Cleanup"),
+        Some("changelist") => form::Kind::Changelist.label(),
+        Some("properties") => t!("Show SVN Properties"),
+        Some("set_property") => form::Kind::SetProperty.label(),
+        _ => t!("SVN operation"),
     }
 }
 

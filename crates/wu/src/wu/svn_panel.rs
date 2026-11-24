@@ -817,10 +817,13 @@ impl SvnPanel {
                             });
                             this.show_worktree_diff(target, window, cx);
                         }
-                        if let Some(first) = warnings.first() {
-                            let output = warnings.join("\n");
-                            this.last_output = Some(output.clone());
-                            this.show_output_status(first.clone(), output, true, cx);
+                        if this.repos.is_empty()
+                            && let Some(warning) = warnings.first()
+                        {
+                            this.scan_error = Some(warning.clone());
+                        }
+                        for warning in warnings {
+                            log::warn!("SVN discovery: {warning}");
                         }
                     }
                     Err(error) => {
@@ -926,7 +929,7 @@ impl SvnPanel {
         self.set_current(Some(root), window, cx);
         self.error_kind = None;
         self.certificate_target = None;
-        self.preload_history(true, window, cx);
+        self.preload_history(false, window, cx);
         if !self.history.visible && showing_diff {
             self.show_worktree_diff(None, window, cx);
         }
@@ -981,6 +984,11 @@ impl SvnPanel {
         let Some(arguments) = params.as_object_mut() else {
             return;
         };
+        let operation = arguments
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let action = authentication::operation_label(operation.as_deref());
         self.cancel_preview_request();
         let generation = self.preview_generation;
         let id = client.next_id();
@@ -1021,31 +1029,56 @@ impl SvnPanel {
                     |panel| panel.preview_generation == generation, cx,
                 ).await
             };
-            let _ = panel.update_in(cx, |this, window, cx| {
-                if this.preview_generation != generation {
-                    return;
-                }
-                match result {
-                    Ok(result) => {
-                        if let Some(
-                            PreviewRequest::Worktree { id, .. }
-                            | PreviewRequest::Revision { id, .. },
-                        ) = &mut this.preview_request
-                        {
-                            *id = None;
-                        } else {
-                            this.preview_request = None;
+            let _ = panel
+                .update_in(cx, |this, window, cx| {
+                    if this.preview_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(mut result) => {
+                            if background
+                                && let Some(warning) = result
+                                    .as_object_mut()
+                                    .and_then(|result| result.remove("warning"))
+                                && let Some(warning) = warning.as_str()
+                            {
+                                log::warn!("SVN preview refresh: {warning}");
+                            }
+                            if let Some(
+                                PreviewRequest::Worktree { id, .. }
+                                | PreviewRequest::Revision { id, .. },
+                            ) = &mut this.preview_request
+                            {
+                                *id = None;
+                            } else {
+                                this.preview_request = None;
+                            }
+                            if let Err(error) =
+                                this.finish(output, operation.as_deref(), root, result, window, cx)
+                            {
+                                this.preview_request = None;
+                                if background {
+                                    log::debug!("SVN preview refresh: {}", error.message);
+                                } else {
+                                    this.set_error(action, error, certificate_target, cx);
+                                }
+                                cx.notify();
+                            }
                         }
-                        this.finish(output, root, result, window, cx);
+                        Err(error) => {
+                            this.preview_request = None;
+                            if error.kind != "cancelled" {
+                                if background {
+                                    log::debug!("SVN preview refresh: {}", error.message);
+                                } else {
+                                    this.set_error(action, error, certificate_target, cx);
+                                }
+                            }
+                            cx.notify();
+                        }
                     }
-                    Err(error) if error.kind != "cancelled" => {
-                        this.preview_request = None;
-                        this.set_error(error, certificate_target, cx);
-                        cx.notify();
-                    }
-                    Err(_) => this.preview_request = None,
-                }
-            });
+                })
+                .log_err();
         })
         .detach();
     }
@@ -1084,7 +1117,7 @@ impl SvnPanel {
                         toast
                             .icon(
                                 Icon::new(if error {
-                                    IconName::Warning
+                                    IconName::XCircle
                                 } else {
                                     IconName::Subversion
                                 })
@@ -1095,7 +1128,7 @@ impl SvnPanel {
                                     Color::Muted
                                 }),
                             )
-                            .dismiss_button(true),
+                            .dismiss_button(!error),
                     )
                 });
                 workspace.toggle_status_toast(toast, cx);
@@ -1115,63 +1148,72 @@ impl SvnPanel {
             text,
             error,
             move |toast| {
-                toast.action(t!("SVN Output"), move |window, cx| {
-                    preview::text(
-                        workspace.clone(),
-                        t!("SVN Output"),
-                        output.clone(),
-                        window,
-                        cx,
-                    );
+                toast.action(t!("View Log"), move |window, cx| {
+                    Self::open_output(&workspace, &output, window, cx);
                 })
             },
             cx,
         );
     }
 
+    fn open_output(
+        workspace: &WeakEntity<Workspace>,
+        output: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        workspace
+            .update(cx, |workspace, cx| {
+                git_ui_core::notifications::open_command_output(
+                    t!("SVN Output"),
+                    workspace,
+                    output,
+                    window,
+                    cx,
+                );
+            })
+            .log_err();
+    }
+
+    fn record_error(&mut self, error: &rpc::Error, certificate_target: Option<String>) {
+        self.last_output = Some(error.message.clone());
+        self.error_kind = Some(error.kind.clone());
+        self.certificate_target = certificate_target;
+    }
+
     fn set_error(
         &mut self,
+        action: SharedString,
         error: rpc::Error,
         certificate_target: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.last_output = Some(error.message.clone());
-        self.error_kind = Some(error.kind);
-        self.certificate_target = certificate_target;
-        let panel = cx.weak_entity();
+        self.record_error(&error, certificate_target);
+        let message = if error.kind == "uncertain" {
+            t!("{operation} outcome is unknown", operation = action)
+        } else {
+            t!("{operation} failed", operation = action)
+        };
         if let Some(target) = self.certificate_recovery().map(str::to_owned) {
+            let panel = cx.weak_entity();
             self.status_toast(
-                error.message,
+                message,
                 true,
                 move |toast| {
                     toast.action(t!("Verify SVN Server Certificate"), move |window, cx| {
-                        let _ = panel.update(cx, |panel, cx| {
-                            if panel.certificate_recovery() == Some(target.as_str()) {
-                                panel.certificate(window, cx);
-                            }
-                        });
-                    })
-                },
-                cx,
-            );
-        } else if self.needs_credentials() {
-            let root = self.selected_root.clone();
-            self.status_toast(
-                error.message,
-                true,
-                move |toast| {
-                    toast.action(t!("SVN Credentials"), move |window, cx| {
-                        let _ = panel.update(cx, |panel, cx| {
-                            if panel.selected_root == root && panel.needs_credentials() {
-                                panel.start_form(form::Kind::Credentials, window, cx);
-                            }
-                        });
+                        panel
+                            .update(cx, |panel, cx| {
+                                if panel.certificate_recovery() == Some(target.as_str()) {
+                                    panel.certificate(window, cx);
+                                }
+                            })
+                            .log_err();
                     })
                 },
                 cx,
             );
         } else {
-            self.show_output_status(error.message.clone(), error.message, true, cx);
+            self.show_output_status(message, error.message, true, cx);
         }
     }
 
@@ -1215,7 +1257,15 @@ impl SvnPanel {
                 if let Err(error) = task.await {
                     let _ = this.update(cx, |this, cx| {
                         if this.preview_generation == generation {
-                            this.show_status(error.to_string(), true, cx);
+                            this.set_error(
+                                t!("Open File"),
+                                rpc::Error {
+                                    kind: "io".into(),
+                                    message: format!("{error:#}"),
+                                },
+                                None,
+                                cx,
+                            );
                             cx.notify();
                         }
                     });
@@ -1250,13 +1300,23 @@ impl SvnPanel {
             return;
         };
         let checkout = matches!(output, Output::Checkout);
-        let switched = method == "write" && params["operation"].as_str() == Some("switch");
+        let operation = params["operation"].as_str().map(str::to_owned);
+        let action = match (method, operation.as_deref(), output) {
+            ("status", _, _) => t!("Check Remote Status"),
+            (_, _, Output::MergePreview) => t!("Preview Merge"),
+            (_, Some("set_property"), _) if params["value"].is_null() => {
+                form::Kind::RemoveProperty.label()
+            }
+            _ => authentication::operation_label(operation.as_deref()),
+        };
+        let switched = method == "write" && operation.as_deref() == Some("switch");
         let history_changed = method == "write"
             && matches!(
                 params["operation"].as_str(),
                 Some("commit" | "copy_branch" | "switch" | "update")
             );
         let discover = params["with_externals"].as_bool().unwrap_or(false);
+        let writes = method == "write" && params["dry_run"].as_bool() != Some(true);
         let root = self.selected_root.clone();
         if !checkout && root.is_none() {
             return;
@@ -1264,9 +1324,8 @@ impl SvnPanel {
         if !checkout && let Some(root) = &root {
             params = self.repository_params(root, params);
         }
-        if method == "write"
+        if writes
             && !checkout
-            && params["dry_run"].as_bool() != Some(true)
             && !matches!(
                 params["operation"].as_str(),
                 Some("cleanup" | "lock" | "unlock" | "changelist")
@@ -1351,15 +1410,22 @@ impl SvnPanel {
                         if history_changed {
                             this.refresh_editor_baselines(root.as_deref(), window, cx);
                         }
-                        this.finish(output, root, result, window, cx);
+                        if let Err(error) =
+                            this.finish(output, operation.as_deref(), root, result, window, cx)
+                        {
+                            this.set_error(action, error, certificate_target, cx);
+                        }
                     }
                     Err(error) if error.kind == "cancelled" => {}
-                    Err(error) => {
+                    Err(mut error) => {
                         if error.kind == "transport" {
                             this.client = None;
                             this.history_requests.clear();
+                            if writes {
+                                error.kind = "uncertain".into();
+                            }
                         }
-                        this.set_error(error, certificate_target, cx);
+                        this.set_error(action, error, certificate_target, cx);
                     }
                 }
                 if method == "write" && !matches!(output, Output::Checkout) {
@@ -1376,13 +1442,14 @@ impl SvnPanel {
     fn finish(
         &mut self,
         output: Output,
+        operation: Option<&str>,
         root: Option<PathBuf>,
         result: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), rpc::Error> {
         let value = result["text"].as_str().unwrap_or_default().to_owned();
-        let warning = result["warning"].as_str().map(str::to_owned);
+        let mut warning = result["warning"].as_str().map(str::to_owned);
         match output {
             Output::Text => {
                 preview::text(self.workspace.clone(), t!("SVN Output"), value, window, cx)
@@ -1394,79 +1461,59 @@ impl SvnPanel {
                     form.update(cx, |form, cx| form.show_preview(value, window, cx));
                 }
             }
-            Output::BranchPicker => match serde_json::from_value::<branch_picker::Targets>(result) {
-                Ok(targets) => {
-                    if let Some(repo) = self.repo().filter(|repo| Some(&repo.copy.root) == root.as_ref()) {
-                        let copy = repo.copy.clone();
-                        let workspace = self.workspace.clone();
-                        let panel = cx.weak_entity();
-                        window.defer(cx, move |window, cx| {
-                            workspace.update(cx, |workspace, cx| {
+            Output::BranchPicker => {
+                let targets: branch_picker::Targets =
+                    serde_json::from_value(result).map_err(decode_error)?;
+                if let Some(repo) = self
+                    .repo()
+                    .filter(|repo| Some(&repo.copy.root) == root.as_ref())
+                {
+                    let copy = repo.copy.clone();
+                    let workspace = self.workspace.clone();
+                    let panel = cx.weak_entity();
+                    window.defer(cx, move |window, cx| {
+                        workspace
+                            .update(cx, |workspace, cx| {
                                 workspace.toggle_modal(window, cx, |window, cx| {
                                     branch_picker::BranchPicker::new(panel, copy, targets.targets, window, cx)
                                 });
-                            }).log_err();
-                        });
-                    }
-                }
-                Err(error) => self.set_error(decode_error(error), None, cx),
-            },
-            Output::Diff => {
-                let parsed = serde_json::from_value::<preview::DiffResult>(result);
-                let scope = preview::Scope::new(self.preview_generation, cx);
-                match parsed {
-                    Ok(diff) => {
-                        preview::show_diff(self.workspace.clone(), scope, root, diff, window, cx)
-                    }
-                    Err(error) => self.set_error(decode_error(error), None, cx),
+                            })
+                            .log_err();
+                    });
                 }
             }
-            Output::RevisionReview { revision } => match serde_json::from_value(result) {
-                Ok(review) => {
-                    if let Some(root) = root {
-                        preview::revision_diff(
-                            self.workspace.clone(),
-                            preview::Scope::new(self.preview_generation, cx),
-                            root,
-                            revision,
-                            review,
-                            window,
-                            cx,
-                        );
-                    }
+            Output::Diff => {
+                let diff =
+                    serde_json::from_value::<preview::DiffResult>(result).map_err(decode_error)?;
+                let scope = preview::Scope::new(self.preview_generation, cx);
+                preview::show_diff(self.workspace.clone(), scope, root, diff, window, cx);
+            }
+            Output::RevisionReview { revision } => {
+                let review = serde_json::from_value(result).map_err(decode_error)?;
+                if let Some(root) = root {
+                    preview::revision_diff(
+                        self.workspace.clone(),
+                        preview::Scope::new(self.preview_generation, cx),
+                        root,
+                        revision,
+                        review,
+                        window,
+                        cx,
+                    );
                 }
-                Err(error) => {
-                    self.preview_request = None;
-                    self.set_error(decode_error(error), None, cx);
-                    cx.notify();
+            }
+            Output::WorktreeDiff => {
+                let diff = serde_json::from_value(result).map_err(decode_error)?;
+                if let Some(root) = root {
+                    let scope = preview::Scope::new(self.preview_generation, cx);
+                    preview::worktree_diff(self.workspace.clone(), scope, root, diff, window, cx);
                 }
-            },
-            Output::WorktreeDiff => match serde_json::from_value(result) {
-                Ok(diff) => {
-                    if let Some(root) = root {
-                        let scope = preview::Scope::new(self.preview_generation, cx);
-                        preview::worktree_diff(
-                            self.workspace.clone(),
-                            scope,
-                            root,
-                            diff,
-                            window,
-                            cx,
-                        );
-                    }
-                }
-                Err(error) => {
-                    self.preview_request = None;
-                    self.set_error(decode_error(error), None, cx);
-                    cx.notify();
-                }
-            },
-            Output::Blame => match serde_json::from_value(result["blame"].clone()) {
-                Ok(Some(blame)) => preview::blame(self.workspace.clone(), blame, window, cx),
-                Ok(None) => {
-                    preview::text(self.workspace.clone(), t!("SVN Blame"), value, window, cx)
-                }
-                Err(error) => self.set_error(decode_error(error), None, cx),
+            }
+            Output::Blame => match serde_json::from_value(result["blame"].clone())
+                .map_err(decode_error)?
+            {
+                Some(blame) => preview::blame(self.workspace.clone(), blame, window, cx),
+                None => preview::text(self.workspace.clone(), t!("SVN Blame"), value, window, cx),
             },
             Output::Conflict => {
                 if let Some(root) = root {
@@ -1476,6 +1523,7 @@ impl SvnPanel {
                     ) {
                         let url = self.repo().map(|repo| repo.copy.url.clone());
                         self.set_error(
+                            t!("Resolve SVN Conflict"),
                             rpc::Error {
                                 kind: kind.into(),
                                 message: message.into(),
@@ -1501,23 +1549,84 @@ impl SvnPanel {
                 }
             }
             Output::Change | Output::Commit => {
-                let status = value
-                    .lines()
-                    .last()
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| t!("SVN operation completed.").to_string());
-                self.last_output = (!value.is_empty()).then(|| value.clone());
-                if value.is_empty() {
-                    self.show_status(status, false, cx);
-                } else {
-                    self.show_output_status(status, value, false, cx);
-                }
+                let status = match operation {
+                    Some("update" | "switch" | "merge") if svn_reported_conflicts(&value) => {
+                        let message = t!(
+                            "{operation} completed with conflicts",
+                            operation = authentication::operation_label(operation)
+                        );
+                        let workspace = self.workspace.clone();
+                        self.last_output = Some(svn_output(value, warning.take()));
+                        self.status_toast(
+                            message,
+                            false,
+                            move |toast| {
+                                toast
+                                    .icon(
+                                        Icon::new(IconName::Warning)
+                                            .size(IconSize::Small)
+                                            .color(Color::Warning),
+                                    )
+                                    .auto_dismiss(false)
+                                    .action(t!("Open SVN Panel"), move |window, cx| {
+                                        let panel = workspace
+                                            .update(cx, |workspace, cx| {
+                                                workspace.focus_panel::<SvnPanel>(window, cx)
+                                            })
+                                            .log_err()
+                                            .flatten();
+                                        if let Some(panel) = panel {
+                                            panel.update(cx, |panel, cx| {
+                                                if panel.history.visible {
+                                                    panel.history.visible = false;
+                                                    panel
+                                                        .scroll
+                                                        .set_offset(gpui::point(px(0.), px(0.)));
+                                                    cx.notify();
+                                                }
+                                                if let Some(root) = &root {
+                                                    panel.switch_repository(
+                                                        root.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            });
+                                        }
+                                    })
+                            },
+                            cx,
+                        );
+                        return Ok(());
+                    }
+                    Some("update")
+                        if value.lines().all(|line| {
+                            line.is_empty()
+                                || line.starts_with("Updating ")
+                                || line.starts_with("At revision ")
+                        }) && value.lines().any(|line| line.starts_with("At revision ")) =>
+                    {
+                        Some(t!("SVN working copy is already at the target revision"))
+                    }
+                    Some("update") => Some(t!("SVN update complete")),
+                    Some("switch") => Some(t!("SVN switch complete")),
+                    Some("copy_branch") => Some(t!("SVN branch or tag created")),
+                    Some("merge") => Some(t!("SVN merge complete")),
+                    Some("lock") => Some(t!("SVN lock acquired")),
+                    Some("unlock") => Some(t!("SVN lock released")),
+                    _ => None,
+                };
+                self.show_operation_result(status, value, warning.take(), cx);
             }
             Output::Checkout => {
                 if let Some(path) = result["destination"].as_str() {
                     self.checkout_root = Some(PathBuf::from(path));
-                    self.show_status(t!("Checkout complete"), false, cx);
+                    self.show_operation_result(
+                        Some(t!("Checkout complete")),
+                        value,
+                        warning.take(),
+                        cx,
+                    );
                     if let Some(workspace) = self.workspace.upgrade() {
                         workspace.update(cx, |workspace, cx| {
                             workspace
@@ -1537,34 +1646,61 @@ impl SvnPanel {
                     self.refresh(true, window, cx);
                 }
             }
-            Output::RemoteStatus => match serde_json::from_value::<Status>(result) {
-                Ok(Status { copy, entries }) => {
-                    let changed = entries
-                        .iter()
-                        .filter(|entry| entry.remote_item.is_some() || entry.remote_props.is_some())
-                        .count();
-                    self.reconcile_working_copy_history(&copy);
-                    if let Some(repo) = self
-                        .repos
-                        .iter_mut()
-                        .find(|repo| Some(&repo.copy.root) == root.as_ref())
-                    {
-                        *repo = Repo {
-                            copy,
-                            entries,
-                            error: None,
-                        };
-                    }
-                    self.preload_history(false, window, cx);
-                    self.prune_selection();
-                    self.show_status(format!("{} ({changed})", t!("Remote Change")), false, cx);
+            Output::RemoteStatus => {
+                let Status { copy, entries } =
+                    serde_json::from_value(result).map_err(decode_error)?;
+                let changed = entries
+                    .iter()
+                    .filter(|entry| entry.remote_item.is_some() || entry.remote_props.is_some())
+                    .count();
+                self.reconcile_working_copy_history(&copy);
+                if let Some(repo) = self
+                    .repos
+                    .iter_mut()
+                    .find(|repo| Some(&repo.copy.root) == root.as_ref())
+                {
+                    *repo = Repo {
+                        copy,
+                        entries,
+                        error: None,
+                    };
                 }
-                Err(error) => self.set_error(decode_error(error), None, cx),
-            },
+                self.preload_history(false, window, cx);
+                self.prune_selection();
+                let status = if changed == 0 {
+                    t!("No remote SVN changes")
+                } else {
+                    t!("Remote SVN changes: {count}", count = changed)
+                };
+                self.show_operation_result(Some(status), value, warning.take(), cx);
+            }
         }
-        if let Some(warning) = warning {
-            self.show_status(warning, true, cx);
-            cx.notify();
+        if warning.is_some() {
+            self.show_operation_result(None, String::new(), warning, cx);
+        }
+        Ok(())
+    }
+
+    fn show_operation_result(
+        &mut self,
+        status: Option<SharedString>,
+        output: String,
+        warning: Option<String>,
+        cx: &mut App,
+    ) {
+        let status = match (status, warning.is_some()) {
+            (Some(status), true) => Some(t!("{status} (with a warning)", status = status)),
+            (None, true) => Some(t!("SVN operation completed with a warning")),
+            (status, false) => status,
+        };
+        let output = svn_output(output, warning);
+        self.last_output = (!output.is_empty()).then(|| output.clone());
+        if let Some(status) = status {
+            if output.is_empty() {
+                self.show_status(status, false, cx);
+            } else {
+                self.show_output_status(status, output, false, cx);
+            }
         }
     }
 
@@ -1607,9 +1743,13 @@ impl SvnPanel {
         self.refresh = None;
         self.deferred_refresh = None;
         let revision = self.revision;
+        let total = requests.len();
         self.operation = Some(cx.spawn_in(window, async move |this, cx| {
             let mut report = Vec::new();
-            let mut failure = None;
+            let mut failed = 0;
+            let mut uncertain = 0;
+            let mut conflicted = 0;
+            let mut warned = 0;
             let mut cancelled = false;
             let mut updated_roots = Vec::new();
             for (root, params) in requests {
@@ -1628,10 +1768,12 @@ impl SvnPanel {
                     |panel| panel.operation_id == Some(id) && !panel.cancellation_requested, cx,
                 ).await {
                     Ok(result) => {
+                        let output = result["text"].as_str().unwrap_or_default();
+                        let warning = result["warning"].as_str().map(str::to_owned);
+                        conflicted += usize::from(svn_reported_conflicts(output));
+                        warned += usize::from(warning.is_some());
                         report.push(format!(
-                            "{}\n{}",
-                            root.display(),
-                            result["text"].as_str().unwrap_or_default()
+                            "{}\n{}", root.display(), svn_output(output.to_owned(), warning)
                         ));
                         updated_roots.push(root);
                     }
@@ -1646,11 +1788,12 @@ impl SvnPanel {
                                 panel.history_requests.clear();
                             }).log_err();
                         }
-                        failure.get_or_insert_with(|| error.message.clone());
                         report.push(format!("{}\n{}", root.display(), error.message));
-                        if matches!(error.kind.as_str(), "uncertain" | "cancelled" | "transport") {
+                        if matches!(error.kind.as_str(), "uncertain" | "transport") {
+                            uncertain += 1;
                             break;
                         }
+                        failed += 1;
                     }
                 }
             }
@@ -1658,19 +1801,38 @@ impl SvnPanel {
                 if this.revision != revision { return; }
                 this.busy = false;
                 this.operation_id = None;
+                let completed = updated_roots.len();
                 for root in updated_roots {
                     this.invalidate_repository_history(&root);
                 }
-                let output = report.join("\n\n");
-                this.last_output = Some(output.clone());
-                let message = if let Some(error) = &failure {
-                    error.clone().into()
-                } else if cancelled || this.cancellation_requested {
-                    t!("Operation was canceled")
-                } else {
-                    t!("SVN operation completed.")
-                };
-                this.show_output_status(message, output, failure.is_some(), cx);
+                if !report.is_empty() {
+                    let skipped = total - completed - failed - uncertain;
+                    let summary = t!(
+                        "Working copies: {completed} completed, {failed} failed, {uncertain} unverified, {skipped} skipped. Conflicts in {conflicted}, warnings in {warned}.",
+                        completed = completed,
+                        failed = failed,
+                        uncertain = uncertain,
+                        skipped = skipped,
+                        conflicted = conflicted,
+                        warned = warned,
+                    );
+                    let output = format!("{summary}\n\n{}", report.join("\n\n"));
+                    this.last_output = Some(output.clone());
+                    let message = if uncertain > 0 {
+                        t!("SVN update stopped with an unknown outcome")
+                    } else if cancelled || skipped > 0 {
+                        t!("SVN update cancelled after processing {processed} of {total} working copies", processed = completed + failed, total = total)
+                    } else if failed > 0 {
+                        t!("SVN update: {completed} completed, {failed} failed", completed = completed, failed = failed)
+                    } else if conflicted > 0 {
+                        t!("SVN update completed with conflicts in {count} working copies", count = conflicted)
+                    } else if warned > 0 {
+                        t!("SVN update complete (with a warning)")
+                    } else {
+                        t!("SVN update complete")
+                    };
+                    this.show_output_status(message, output, failed > 0 || uncertain > 0, cx);
+                }
                 this.refresh_editor_baselines(None, window, cx);
                 this.refresh(false, window, cx);
             });
@@ -1699,6 +1861,20 @@ impl SvnPanel {
         self.active_directory = None;
         cx.notify();
     }
+}
+
+fn svn_output(mut output: String, warning: Option<String>) -> String {
+    if let Some(warning) = warning {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(&t!("Warning: {warning}", warning = warning));
+    }
+    output
+}
+
+fn svn_reported_conflicts(output: &str) -> bool {
+    output.lines().any(|line| line == "Summary of conflicts:")
 }
 
 fn decode_error(error: serde_json::Error) -> rpc::Error {
@@ -2020,7 +2196,7 @@ impl SvnPanel {
         let binary = match provider.executable() {
             Ok(binary) => binary,
             Err(error) => {
-                self.set_error(error, None, cx);
+                self.set_error(title, error, None, cx);
                 return;
             }
         };

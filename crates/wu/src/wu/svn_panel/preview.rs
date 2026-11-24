@@ -746,7 +746,23 @@ fn comparison_diff(
                     Ok(Some(prepared)) => prepared,
                     Ok(None) => return,
                     Err(error) => {
-                        panel.show_status(error.to_string(), true, cx);
+                        if background {
+                            log::debug!("SVN diff refresh: {error:#}");
+                        } else {
+                            panel.set_error(
+                                if historical_revision.is_some() {
+                                    t!("SVN History")
+                                } else {
+                                    t!("Working Copy Diff")
+                                },
+                                rpc::Error {
+                                    kind: "io".into(),
+                                    message: format!("{error:#}"),
+                                },
+                                None,
+                                cx,
+                            );
+                        }
                         cx.notify();
                         return;
                     }
