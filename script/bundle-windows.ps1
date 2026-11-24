@@ -68,7 +68,9 @@ Pop-Location
 
 if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) {
     $cargoToml = Get-Content "$workspace\crates\wu\Cargo.toml"
-    $env:RELEASE_VERSION = ($cargoToml | Select-String -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+    $upstreamVersion = ($cargoToml | Select-String -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+    $plusRevision = (Get-Content "$workspace\crates\release_channel\WU_PLUS_REVISION" -Raw).Trim()
+    $env:RELEASE_VERSION = "$upstreamVersion.$plusRevision"
 }
 
 $innoDir = "$workspace\inno\$Architecture"

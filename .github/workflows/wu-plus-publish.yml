@@ -63,7 +63,10 @@ jobs:
           REVISION: ${{ steps.candidate.outputs.revision }}
         run: |
           version=$(cat manifest/version.txt)
-          [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.[1-9][0-9]*$ ]]; then
+            printf '候选版本 %s 必须使用四段 Wu Plus 版本号。\n' "$version" >&2
+            exit 1
+          fi
           tag="wu-plus-v$version"
           [[ $(sha256sum manifest/SHA256SUMS | cut -d ' ' -f 1) == "$APPROVED_SHA" ]]
           cd bundles
@@ -81,8 +84,13 @@ jobs:
           import re
           import sys
           latest, version = sys.argv[1:]
-          match = re.fullmatch(r"wu-plus-v(\d+\.\d+\.\d+)", latest)
-          if match is None or tuple(map(int, version.split("."))) <= tuple(map(int, match[1].split("."))):
+          match = re.fullmatch(r"wu-plus-v(\d+\.\d+\.\d+(?:\.[1-9]\d*)?)", latest)
+          if match is None:
+              sys.exit("The current Wu Plus release tag is invalid.")
+          current = tuple(map(int, match[1].split(".")))
+          if len(current) == 3:
+              current += (0,)
+          if tuple(map(int, version.split("."))) <= current:
               sys.exit("The release version must be newer than the current Wu Plus release.")
           PY
           fi

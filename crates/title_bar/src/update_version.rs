@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use auto_update::{AutoUpdateStatus, AutoUpdater, UpdateCheckType};
+use auto_update::{AutoUpdateStatus, AutoUpdater, UpdateCheckType, WuPlusVersion};
 use gpui::{Empty, Render};
-use semver::Version;
 use ui::{Tooltip, UpdateButton, prelude::*};
 
 pub struct UpdateVersion {
@@ -41,14 +40,14 @@ impl UpdateVersion {
         let next_state = match self.status {
             AutoUpdateStatus::Idle => AutoUpdateStatus::Checking,
             AutoUpdateStatus::Checking => AutoUpdateStatus::Downloading {
-                version: Version::new(1, 99, 0),
+                version: WuPlusVersion::new(1, 99, 0, 1),
                 progress: Some(0.5),
             },
             AutoUpdateStatus::Downloading { .. } => AutoUpdateStatus::Installing {
-                version: Version::new(1, 99, 0),
+                version: WuPlusVersion::new(1, 99, 0, 1),
             },
             AutoUpdateStatus::Installing { .. } => AutoUpdateStatus::Updated {
-                version: Version::new(1, 99, 0),
+                version: WuPlusVersion::new(1, 99, 0, 1),
             },
             AutoUpdateStatus::Updated { .. } => AutoUpdateStatus::Errored {
                 error: Arc::new(anyhow!("Network timeout")),
@@ -77,7 +76,7 @@ impl UpdateVersion {
         cx.notify()
     }
 
-    fn version_tooltip_message(version: &Version) -> String {
+    fn version_tooltip_message(version: &WuPlusVersion) -> String {
         UpdateButton::version_tooltip_message(version)
     }
 }
@@ -92,7 +91,7 @@ impl Render for UpdateVersion {
                 UpdateButton::checking().into_any_element()
             }
             AutoUpdateStatus::Downloading { version, progress } => {
-                let rendered_version = version.clone();
+                let rendered_version = *version;
                 let tooltip = Tooltip::element(move |_, cx| {
                     let status = AutoUpdater::get(cx).map(|updater| updater.read(cx).status());
                     let message = match &status {
@@ -135,31 +134,21 @@ impl Render for UpdateVersion {
 }
 #[cfg(test)]
 mod tests {
-    use semver::Version;
-
     use super::*;
 
     #[test]
     fn test_version_tooltip_message() {
-        let message = UpdateVersion::version_tooltip_message(&Version::new(1, 0, 0));
+        let message = UpdateVersion::version_tooltip_message(&WuPlusVersion::new(1, 0, 0, 0));
 
         assert_eq!(message, "Update to Version: 1.0.0");
 
-        let message = UpdateVersion::version_tooltip_message(
-            &"1.0.0+nightly.14d9a4189f058d8736339b06ff2340101eaea5af"
-                .parse()
-                .unwrap(),
-        );
-
-        assert_eq!(
-            message,
-            "Update to Version: 1.0.0+nightly.14d9a4189f058d8736339b06ff2340101eaea5af"
-        );
+        let message = UpdateVersion::version_tooltip_message(&WuPlusVersion::new(1, 0, 0, 10));
+        assert_eq!(message, "Update to Version: 1.0.0.10");
     }
 
     #[test]
     fn test_downloading_tooltip_message() {
-        let version = Version::new(1, 0, 0);
+        let version = WuPlusVersion::new(1, 0, 0, 0);
 
         let message = UpdateButton::downloading_tooltip_message(&version, None);
         assert_eq!(message, "Update to Version: 1.0.0");

@@ -6,8 +6,7 @@ use gpui::{
     prelude::*,
 };
 use i18n::t;
-use release_channel::ReleaseChannel;
-use semver::Version;
+use release_channel::{ReleaseChannel, WuPlusVersion};
 use ui::{AnnouncementToast, ListBulletItem, prelude::*};
 use workspace::{
     Workspace,
@@ -65,7 +64,7 @@ struct AnnouncementContent {
     on_dismiss: Option<Arc<dyn Fn(&mut App) + Send + Sync>>,
 }
 
-fn announcement_for_version(_version: &Version, _cx: &App) -> Option<AnnouncementContent> {
+fn announcement_for_version(_version: &WuPlusVersion, _cx: &App) -> Option<AnnouncementContent> {
     None
 }
 
@@ -147,9 +146,7 @@ fn show_update_notification(cx: &mut App) {
         return;
     };
 
-    let mut version = updater.read(cx).current_version();
-    version.pre = semver::Prerelease::EMPTY;
-    version.build = semver::BuildMetadata::EMPTY;
+    let version = updater.read(cx).current_version();
     let app_name = ReleaseChannel::global(cx).display_name();
 
     if let Some(content) = announcement_for_version(&version, cx) {

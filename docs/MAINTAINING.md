@@ -59,11 +59,13 @@ Windows 运行 `Wu-Plus-Dev-x86_64.exe` 安装后，在 PowerShell 中将下面�
 
 快速验收按平台和架构使用独立的 Rust 缓存。正式候选的 macOS Apple Silicon、macOS Intel 和 Windows x86_64 使用自己的缓存。手动运行时可用 `rust_cache` 切换缓存。比较同一提交的冷、热构建时，确认缓存是否命中，并记录缓存恢复、保存和排队时间。 [快速验收配置](../.github/workflows/wu-plus-verify.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
 
+macOS 正式候选按架构并行构建 IDE 和远程服务端。两个任务可以读取同一架构的 Rust 缓存，由 IDE 任务保存。候选清单会收齐两种架构的安装包和远程服务端，再生成发布校验值。
+
 ### 跟进 Wu 上游
 
 1. 定时任务会查找上游正式发布，并在运行摘要提示版本差异。把新标签对应的提交合入集成分支，更新 `scripts/wu-upstream.json` 的标签和提交。
 2. 在集成分支运行 `scripts/wu.sh check`，再用快速验收或本地包验证实际工作区。传给脚本或候选工作流的上游版本应与该提交固定的标签一致。
-3. 将通过验收的源码合入默认分支，构建完整候选。产品版本取自 `crates/wu/Cargo.toml`。即使上游版本相同，发布 Wu Plus 修复版时也要递增产品版本并同步 `Cargo.lock`。
+3. 将通过验收的源码合入默认分支，构建完整候选。`crates/wu/Cargo.toml` 和 `Cargo.lock` 跟随上游 Wu 版本。Wu Plus 的第四段取自 `crates/release_channel/WU_PLUS_REVISION`。同一上游版本发布修复时递增第四段，跟进新上游版本时从 `1` 开始。
 
 ### macOS 签名
 
@@ -79,6 +81,6 @@ Windows 运行 `Wu-Plus-Dev-x86_64.exe` 安装后，在 PowerShell 中将下面�
 
 1. 从候选运行的 **Artifacts** 下载各平台包，用独立配置验收。
 2. 在 **Wu Plus publish** 提供候选运行 ID 和候选摘要中的 `SHA256SUMS` 文件摘要。发布工作流从默认分支接受本仓库成功的完整候选，并逐项复核包和发行说明的哈希。
-3. 发布后的标签格式为 `wu-plus-v<版本>`。Wu 原生更新器从本项目的 GitHub Releases 下载匹配平台的资产，校验 GitHub 提供的 SHA-256，重启后应用更新。
+3. 发布后的标签格式为 `wu-plus-v<上游版本>.<修订号>`，例如 `wu-plus-v1.5.0.1`。更新器从本项目的 GitHub Releases 下载匹配平台的资产，校验 GitHub 提供的 SHA-256，重启后应用更新。SSH 和 WSL 的远程服务端也按该版本获取。
 
 升级日常配置前保留一份数据目录备份。回退时，退出 Wu Plus，安装带相应 SVN 后台的上一版 App。如果配置或数据库格式已经升级，再恢复升级前的数据备份。 [安装与迁移](INSTALL.md#设置和应用更新) · [发布工作流](../.github/workflows/wu-plus-publish.yml)

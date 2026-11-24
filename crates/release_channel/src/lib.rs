@@ -7,6 +7,9 @@ use std::{env, str::FromStr, sync::LazyLock};
 use gpui::{App, Global};
 use semver::Version;
 
+mod wu_plus_version;
+pub use wu_plus_version::{InvalidWuPlusVersion, WuPlusVersion};
+
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
 /// stable | dev
@@ -105,6 +108,8 @@ impl AppVersion {
             pkg_version.parse().expect("invalid version in Cargo.toml")
         };
         let mut pre = String::from(RELEASE_CHANNEL.dev_name());
+        pre.push_str(".wu-plus.");
+        pre.push_str(env!("WU_PLUS_REVISION"));
 
         if let Some(build_id) = build_id {
             pre.push('.');

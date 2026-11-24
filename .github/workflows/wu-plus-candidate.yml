@@ -49,8 +49,17 @@ jobs:
           tag=$(jq -er .tag scripts/wu-upstream.json)
           revision=$(jq -er .revision scripts/wu-upstream.json)
           git merge-base --is-ancestor "$revision" "$GITHUB_SHA"
-          version=$(awk -F '"' '/^version = / {print $2; exit}' crates/wu/Cargo.toml)
-          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          upstream_version=$(awk -F '"' '/^version = / {print $2; exit}' crates/wu/Cargo.toml)
+          if [[ $upstream_version != "${tag#v}" || ! $upstream_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Cargo 版本 %s 必须与上游 Wu 标签 %s 一致。\n' "$upstream_version" "$tag" >&2
+            exit 1
+          fi
+          release_revision=$(<crates/release_channel/WU_PLUS_REVISION)
+          if [[ ! $release_revision =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Wu Plus 修订号必须是正整数。\n' >&2
+            exit 1
+          fi
+          version="$upstream_version.$release_revision"
           if [[ -n $REQUESTED_WU && $REQUESTED_WU != "$tag" ]]; then
             printf '此提交固定在 Wu %s，请先在集成分支合入目标版本。\n' "$tag" >&2
             exit 1
@@ -77,22 +86,27 @@ jobs:
       fail-fast: false
       matrix:
         arch: [aarch64, x86_64]
+        component: [ide, remote-server]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Install dependencies
-        run: brew install lld cmake pkgconf subversion
+        run: brew install lld cmake pkgconf
       - name: Cache macOS Rust dependencies
         if: github.event_name == 'schedule' || inputs.rust_cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: wu-plus-candidate-${{ matrix.arch }}
           cache-bin: false
+          save-if: ${{ matrix.component == 'ide' }}
       - name: Test Subversion backend
-        if: matrix.arch == 'aarch64'
-        run: cargo test --locked --manifest-path plugin/Cargo.toml
+        if: matrix.component == 'ide' && matrix.arch == 'aarch64'
+        run: |
+          brew install subversion
+          cargo test --locked --manifest-path plugin/Cargo.toml
       - name: Prepare provisioning profile
+        if: matrix.component == 'ide'
         env:
           MACOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
         run: |
@@ -101,9 +115,10 @@ jobs:
             printf '%s' "$MACOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$profile_path"
             printf 'MACOS_PROVISIONING_PROFILE=%s\n' "$profile_path" >> "$GITHUB_ENV"
           fi
-      - name: Bundle and sign as upstream Wu
+      - name: Bundle and sign macOS ${{ matrix.component }}
         env:
           TARGET_ARCH: ${{ matrix.arch }}
+          BUNDLE_MODE: ${{ matrix.component == 'ide' && '-s' || '-r' }}
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -111,28 +126,27 @@ jobs:
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
-        run: script/bundle-mac "$TARGET_ARCH-apple-darwin"
+        run: script/bundle-mac "$BUNDLE_MODE" "$TARGET_ARCH-apple-darwin"
       - name: Check Simplified Chinese strings and commands
-        if: matrix.arch == 'aarch64'
+        if: matrix.component == 'ide' && matrix.arch == 'aarch64'
         run: script/check-translations --binary target/aarch64-apple-darwin/release/wu
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.component == 'ide'
         with:
           name: wu-plus-debug-symbols-macos-${{ matrix.arch }}
           path: target/${{ matrix.arch }}-apple-darwin/release/Wu.dSYM.zip
           if-no-files-found: error
+          overwrite: true
           compression-level: 0
           retention-days: 30
-      - name: Stage macOS release files
-        env:
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          mkdir "$RUNNER_TEMP/bundle"
-          cp "target/$TARGET_ARCH-apple-darwin/release/Wu-Plus-$TARGET_ARCH.dmg" \
-            "target/wu-remote-server-macos-$TARGET_ARCH.gz" "$RUNNER_TEMP/bundle/"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload macOS release asset
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wu-plus-bundle-macos-${{ matrix.arch }}
-          path: ${{ runner.temp }}/bundle/*
+          name: wu-plus-bundle-macos-${{ matrix.arch }}${{ matrix.component == 'remote-server' && '-remote-server' || '' }}
+          path: >-
+            ${{ matrix.component == 'ide'
+                && format('target/{0}-apple-darwin/release/Wu-Plus-{0}.dmg', matrix.arch)
+                || format('target/wu-remote-server-macos-{0}.gz', matrix.arch) }}
           if-no-files-found: error
           overwrite: true
           compression-level: 0

@@ -61,4 +61,6 @@ SVN 沿用用户的 SVN 配置、认证缓存和 SSH Agent。可在「SVN 凭据
 
 macOS 上，Wu Plus 默认将配置、扩展、状态、日志和缓存存放在 `~/Library/Application Support/Wu Plus`。从官方 Wu 首次迁移时，先退出两个应用，再从仓库根目录运行 `scripts/migrate-profile.sh`。脚本会将已有设置和扩展复制到尚未创建的 Wu Plus 数据目录。迁移应在首次启动 Wu Plus 前完成。
 
-正式版通过应用内「检查更新」获取本项目 Releases 的版本，自动检查遵循 `auto_update` 设置，更新需要重启。SVN 后台随 App 一起更新。 [更新与回退](MAINTAINING.md#发布与回退)
+从三段版本 `1.5.0` 升级到四段版本 `1.5.0.1` 时，请下载匹配平台的安装包并覆盖安装一次。IDE 的配置和工作区数据存放在独立的数据目录。
+
+从 `1.5.0.1` 开始，正式版通过应用内「检查更新」获取本项目 Releases 的版本。自动检查遵循 `auto_update` 设置，更新需要重启，SVN 后台随 App 一起更新。 [更新与回退](MAINTAINING.md#发布与回退)

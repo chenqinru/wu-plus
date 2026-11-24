@@ -62,7 +62,7 @@ use project::{
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
-use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, AppVersion, ReleaseChannel, WuPlusVersion};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use search::search_panel::SearchPanel;
@@ -1270,8 +1270,9 @@ fn open_about_window(cx: &mut App) {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
-            let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            let app_version = AppVersion::global(cx);
+            let full_version: SharedString = app_version.to_string().into();
+            let version = WuPlusVersion::from(&app_version);
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"

@@ -10,8 +10,9 @@ use http_client::{HttpClient, HttpClientWithUrl};
 use i18n::t;
 use paths::remote_servers_dir;
 use release_channel::ReleaseChannel;
+pub use release_channel::WuPlusVersion;
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use settings::{RegisterSetting, Settings, SettingsStore};
 use sha2::{Digest, Sha256};
 use smol::fs::File;
@@ -165,16 +166,16 @@ pub enum AutoUpdateStatus {
     Idle,
     Checking,
     Downloading {
-        version: Version,
+        version: WuPlusVersion,
         /// Download progress as a fraction in the range `0.0..=1.0`, or `None`
         /// when the total download size is not yet known.
         progress: Option<f32>,
     },
     Installing {
-        version: Version,
+        version: WuPlusVersion,
     },
     Updated {
-        version: Version,
+        version: WuPlusVersion,
     },
     Errored {
         error: Arc<anyhow::Error>,
@@ -216,7 +217,7 @@ impl AutoUpdateStatus {
 
 pub struct AutoUpdater {
     status: AutoUpdateStatus,
-    current_version: Version,
+    current_version: WuPlusVersion,
     client: Arc<Client>,
     pending_poll: Option<Task<Option<()>>>,
     quit_subscription: Option<gpui::Subscription>,
@@ -225,12 +226,12 @@ pub struct AutoUpdater {
     dismissed_status: Option<AutoUpdateStatus>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct ReleaseAsset {
-    pub version: String,
-    pub url: String,
+#[derive(Debug)]
+struct ReleaseAsset {
+    version: WuPlusVersion,
+    url: String,
     /// Hex SHA-256 of the asset, when the release publishes one.
-    pub digest: Option<String>,
+    digest: Option<String>,
 }
 
 const WU_PLUS_RELEASES_API_URL: &str = "https://api.github.com/repos/chenqinru/wu-plus/releases";
@@ -339,7 +340,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     })
     .detach();
 
-    let version = release_channel::AppVersion::global(cx);
+    let version = WuPlusVersion::from(&release_channel::AppVersion::global(cx));
     let auto_updater = cx.new(|cx| {
         let updater = AutoUpdater::new(version, client, cx);
 
@@ -413,9 +414,7 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
         ReleaseChannel::Stable => {
             let auto_updater = AutoUpdater::get(cx)?;
             let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
+            let current_version = auto_updater.current_version;
             format!(
                 "https://github.com/chenqinru/wu-plus/releases/tag/{WU_PLUS_TAG_PREFIX}{current_version}"
             )
@@ -491,7 +490,7 @@ impl AutoUpdater {
         cx.default_global::<GlobalAutoUpdate>().0.clone()
     }
 
-    fn new(current_version: Version, client: Arc<Client>, cx: &mut Context<Self>) -> Self {
+    fn new(current_version: WuPlusVersion, client: Arc<Client>, cx: &mut Context<Self>) -> Self {
         // On windows, executable files cannot be overwritten while they are
         // running, so we must wait to overwrite the application until quitting
         // or restarting. When quitting the app, we spawn the auto update helper
@@ -623,8 +622,8 @@ impl AutoUpdater {
         }));
     }
 
-    pub fn current_version(&self) -> Version {
-        self.current_version.clone()
+    pub fn current_version(&self) -> WuPlusVersion {
+        self.current_version
     }
 
     pub fn status(&self) -> AutoUpdateStatus {
@@ -744,9 +743,8 @@ impl AutoUpdater {
 
         let asset_name = github_asset_name(asset, os, arch)?;
         let url = match version {
-            Some(mut version) => {
-                version.pre = semver::Prerelease::EMPTY;
-                version.build = semver::BuildMetadata::EMPTY;
+            Some(version) => {
+                let version = WuPlusVersion::from(&version);
                 format!("{WU_PLUS_RELEASES_API_URL}/tags/{WU_PLUS_TAG_PREFIX}{version}")
             }
             None => format!("{WU_PLUS_RELEASES_API_URL}/latest"),
@@ -788,7 +786,8 @@ impl AutoUpdater {
                 .tag_name
                 .strip_prefix(WU_PLUS_TAG_PREFIX)
                 .with_context(|| format!("unexpected release tag {}", release.tag_name))?
-                .to_string(),
+                .parse()
+                .with_context(|| format!("invalid release version in tag {}", release.tag_name))?,
             url: asset.browser_download_url,
             digest: asset.digest.map(|digest| {
                 digest
@@ -804,7 +803,7 @@ impl AutoUpdater {
             this.read_with(cx, |this, cx| {
                 (
                     this.client.http_client(),
-                    this.current_version.clone(),
+                    this.current_version,
                     this.status.clone(),
                     ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
                 )
@@ -822,12 +821,11 @@ impl AutoUpdater {
 
         let fetched_release_data =
             Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
-        let fetched_version = fetched_release_data.clone().version;
         let newer_version = Self::check_if_fetched_version_is_newer(
             installed_version,
-            fetched_version,
-            previous_status.clone(),
-        )?;
+            fetched_release_data.version,
+            &previous_status,
+        );
 
         let Some(newer_version) = newer_version else {
             this.update(cx, |this, cx| {
@@ -843,7 +841,7 @@ impl AutoUpdater {
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Downloading {
-                version: newer_version.clone(),
+                version: newer_version,
                 progress: None,
             };
             cx.notify();
@@ -877,7 +875,7 @@ impl AutoUpdater {
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Installing {
-                version: newer_version.clone(),
+                version: newer_version,
             };
             cx.notify();
         });
@@ -923,20 +921,15 @@ impl AutoUpdater {
     }
 
     fn check_if_fetched_version_is_newer(
-        installed_version: Version,
-        fetched_version: String,
-        status: AutoUpdateStatus,
-    ) -> Result<Option<Version>> {
-        let fetched_version = fetched_version.parse::<Version>()?;
-        let current_version = if let AutoUpdateStatus::Updated { version } = status {
-            version
-        } else {
-            installed_version
+        installed_version: WuPlusVersion,
+        fetched_version: WuPlusVersion,
+        status: &AutoUpdateStatus,
+    ) -> Option<WuPlusVersion> {
+        let current_version = match status {
+            AutoUpdateStatus::Updated { version } => *version,
+            _ => installed_version,
         };
-        Ok(Self::check_if_fetched_version_is_newer_non_nightly(
-            current_version,
-            fetched_version,
-        ))
+        (fetched_version > current_version).then_some(fetched_version)
     }
 
     fn check_dependencies() -> Result<()> {
@@ -999,16 +992,6 @@ impl AutoUpdater {
         }
     }
 
-    fn check_if_fetched_version_is_newer_non_nightly(
-        mut installed_version: Version,
-        fetched_version: Version,
-    ) -> Option<Version> {
-        // For non-nightly releases, ignore build and pre-release fields as they're not provided by our endpoints right now.
-        installed_version.pre = semver::Prerelease::EMPTY;
-        installed_version.build = semver::BuildMetadata::EMPTY;
-        (fetched_version > installed_version).then_some(fetched_version)
-    }
-
     pub fn set_should_show_update_notification(
         &self,
         should_show: bool,
@@ -1032,7 +1015,7 @@ impl AutoUpdater {
 
     /// Records that an update to `version` was staged, so the "updated"
     /// notification can be shown once that version is actually running.
-    fn record_installed_update(&self, version: &Version, cx: &App) -> Task<Result<()>> {
+    fn record_installed_update(&self, version: &WuPlusVersion, cx: &App) -> Task<Result<()>> {
         let kvp = KeyValueStore::global(cx);
         let version = version.to_string();
         cx.background_spawn(async move {
@@ -1043,9 +1026,7 @@ impl AutoUpdater {
 
     pub fn should_show_update_notification(&self, cx: &App) -> Task<Result<bool>> {
         let kvp = KeyValueStore::global(cx);
-        let mut running_version = self.current_version.clone();
-        running_version.pre = semver::Prerelease::EMPTY;
-        running_version.build = semver::BuildMetadata::EMPTY;
+        let running_version = self.current_version;
         cx.background_spawn(async move {
             let Some(recorded_version) = kvp.read_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY)? else {
                 return Ok(false);
@@ -1496,8 +1477,8 @@ mod tests {
     #[gpui::test]
     async fn test_auto_update_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
-        let installed_version = Version::new(0, 100, 0);
-        let update_version = Version::new(0, 100, 1);
+        let installed_version = WuPlusVersion::new(0, 100, 0, 9);
+        let update_version = WuPlusVersion::new(0, 100, 0, 10);
         let release_available = Arc::new(AtomicBool::new(false));
         let payload = "<fake-wu-plus-update>";
         let temporary = tempdir().unwrap();
@@ -1506,7 +1487,7 @@ mod tests {
         let auto_updater = cx.update(|cx| {
             settings::init(cx);
             cx.set_global(db::AppDatabase::test_new());
-            release_channel::init_test(installed_version.clone(), ReleaseChannel::Stable, cx);
+            release_channel::init_test(Version::new(0, 100, 0), ReleaseChannel::Stable, cx);
             let destination = destination.clone();
             cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
                 std::fs::copy(target_path, &destination)?;
@@ -1519,9 +1500,9 @@ mod tests {
                     let body = match request.uri().path() {
                         "/repos/chenqinru/wu-plus/releases/latest" => {
                             let tag = if available {
-                                "wu-plus-v0.100.1"
+                                "wu-plus-v0.100.0.10"
                             } else {
-                                "wu-plus-v0.100.0"
+                                "wu-plus-v0.100.0.9"
                             };
                             serde_json::json!({
                                 "tag_name": tag,
@@ -1533,14 +1514,38 @@ mod tests {
                             })
                             .to_string()
                         }
+                        "/repos/chenqinru/wu-plus/releases/tags/wu-plus-v0.100.0.9" => {
+                            serde_json::json!({
+                                "tag_name": "wu-plus-v0.100.0.9",
+                                "assets": [{
+                                    "name": github_asset_name("wu-remote-server", OS, ARCH)?,
+                                    "browser_download_url": "https://test.example/remote-server",
+                                }],
+                            })
+                            .to_string()
+                        }
                         "/new-download" => payload.to_owned(),
                         _ => return Ok(Response::builder().status(404).body("".into())?),
                     };
                     Ok(Response::builder().status(200).body(body.into())?)
                 }
             }));
-            cx.new(|cx| AutoUpdater::new(installed_version.clone(), client, cx))
+            cx.new(|cx| AutoUpdater::new(installed_version, client, cx))
         });
+
+        let remote_release = AutoUpdater::get_release_asset(
+            &auto_updater,
+            ReleaseChannel::Stable,
+            Some(Version::parse("0.100.0+stable.wu-plus.9.123").unwrap()),
+            "wu-remote-server",
+            OS,
+            ARCH,
+            &mut cx.to_async(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote_release.version, installed_version);
+        assert_eq!(remote_release.url, "https://test.example/remote-server");
 
         AutoUpdater::update(auto_updater.clone(), &mut cx.to_async())
             .await
@@ -1593,7 +1598,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let target_path = temp_dir.path().join("zed-download");
         let release = ReleaseAsset {
-            version: "1.0.0".to_string(),
+            version: WuPlusVersion::new(1, 0, 0, 0),
             url: "https://test.example/download".to_string(),
             digest: None,
         };
@@ -1654,7 +1659,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let target_path = temp_dir.path().join("zed-download");
         let release = ReleaseAsset {
-            version: "1.0.0".to_string(),
+            version: WuPlusVersion::new(1, 0, 0, 0),
             url: "https://test.example/download".to_string(),
             digest: None,
         };
@@ -1681,65 +1686,65 @@ mod tests {
 
     #[test]
     fn test_stable_does_not_update_when_fetched_version_is_not_higher() {
-        let installed_version = semver::Version::new(1, 0, 0);
+        let installed_version = WuPlusVersion::new(1, 0, 0, 1);
         let status = AutoUpdateStatus::Idle;
-        let fetched_version = semver::Version::new(1, 0, 0);
+        let fetched_version = installed_version;
 
         let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
             installed_version,
-            fetched_version.to_string(),
-            status,
+            fetched_version,
+            &status,
         );
 
-        assert_eq!(newer_version.unwrap(), None);
+        assert_eq!(newer_version, None);
     }
 
     #[test]
     fn test_stable_does_update_when_fetched_version_is_higher() {
-        let installed_version = semver::Version::new(1, 0, 0);
+        let installed_version = WuPlusVersion::new(1, 0, 0, 0);
         let status = AutoUpdateStatus::Idle;
-        let fetched_version = semver::Version::new(1, 0, 1);
+        let fetched_version = WuPlusVersion::new(1, 0, 0, 1);
 
         let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
             installed_version,
-            fetched_version.to_string(),
-            status,
+            fetched_version,
+            &status,
         );
 
-        assert_eq!(newer_version.unwrap(), Some(fetched_version));
+        assert_eq!(newer_version, Some(fetched_version));
     }
 
     #[test]
     fn test_stable_does_not_update_when_fetched_version_is_not_higher_than_cached() {
-        let installed_version = semver::Version::new(1, 0, 0);
+        let installed_version = WuPlusVersion::new(1, 0, 0, 1);
         let status = AutoUpdateStatus::Updated {
-            version: semver::Version::new(1, 0, 1),
+            version: WuPlusVersion::new(1, 0, 0, 10),
         };
-        let fetched_version = semver::Version::new(1, 0, 1);
+        let fetched_version = WuPlusVersion::new(1, 0, 0, 9);
 
         let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
             installed_version,
-            fetched_version.to_string(),
-            status,
+            fetched_version,
+            &status,
         );
 
-        assert_eq!(newer_version.unwrap(), None);
+        assert_eq!(newer_version, None);
     }
 
     #[test]
     fn test_stable_does_update_when_fetched_version_is_higher_than_cached() {
-        let installed_version = semver::Version::new(1, 0, 0);
+        let installed_version = WuPlusVersion::new(1, 0, 0, 1);
         let status = AutoUpdateStatus::Updated {
-            version: semver::Version::new(1, 0, 1),
+            version: WuPlusVersion::new(1, 0, 0, 9),
         };
-        let fetched_version = semver::Version::new(1, 0, 2);
+        let fetched_version = WuPlusVersion::new(1, 0, 0, 10);
 
         let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
             installed_version,
-            fetched_version.to_string(),
-            status,
+            fetched_version,
+            &status,
         );
 
-        assert_eq!(newer_version.unwrap(), Some(fetched_version));
+        assert_eq!(newer_version, Some(fetched_version));
     }
 }

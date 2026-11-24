@@ -1338,6 +1338,8 @@ mod mac_os {
     struct InfoPlist {
         #[serde(rename = "CFBundleShortVersionString")]
         bundle_short_version_string: String,
+        #[serde(rename = "WuPlusVersion")]
+        wu_plus_version: Option<String>,
     }
 
     enum Bundle {
@@ -1514,7 +1516,11 @@ mod mac_os {
     impl Bundle {
         fn version(&self) -> String {
             match self {
-                Self::App { plist, .. } => plist.bundle_short_version_string.clone(),
+                Self::App { plist, .. } => plist
+                    .wu_plus_version
+                    .as_ref()
+                    .unwrap_or(&plist.bundle_short_version_string)
+                    .clone(),
                 Self::LocalPath { .. } => "<development>".to_string(),
             }
         }
