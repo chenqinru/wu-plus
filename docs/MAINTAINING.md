@@ -1,6 +1,6 @@
 # Wu Plus 开发与维护
 
-Wu Plus 直接在 Wu 源码上开发，当前固定的上游标签和提交记录在 `scripts/wu-upstream.json`。宿主和 SVN 后台在同一仓库维护。macOS App 随包安装同一提交构建的 SVN 后台，宿主通过标准输入输出上的 JSON-RPC 2.0 进行版本握手、请求和取消。后台可以独立编译和测试，直接运行宿主二进制调试时仍可使用开发扩展。
+Wu Plus 直接在 Wu 源码上开发，当前固定的上游标签和提交记录在 `scripts/wu-upstream.json`。macOS、Windows 和 Linux 的安装包会附带同一提交构建的 SVN 后台。宿主通过标准输入输出上的 JSON-RPC 2.0 进行版本握手、请求和取消。后台可以独立编译和测试，macOS 上直接运行宿主二进制调试时仍可使用开发扩展。
 
 ## 本地构建与调试
 
@@ -33,17 +33,31 @@ SVN 测试使用临时仓库和本机 `svnserve`，覆盖提交范围、更新�
 
 | 工作流 | 用途 | 产物 |
 | --- | --- | --- |
-| **Wu Plus verify macOS** | 手动运行，快速验收 Apple Silicon 上的宿主与 SVN | 内置 SVN 的临时签名 `Wu Plus Dev.app`，以 ZIP 提供 |
-| **Wu Plus candidate** | 手动运行或定时检查后构建正式候选 | macOS Apple Silicon 与 Intel、Linux x86_64 与 ARM64、Windows x86_64 的候选包，macOS 包内置 SVN 后台 |
+| **Wu Plus verify** | 手动运行，可用 `platform` 选择 `all`、`macos`、`linux` 或 `windows` | 内置 SVN 的开发验收包，保留 7 天 |
+| **Wu Plus candidate** | 手动运行或定时检查后测试 SVN 并构建正式候选 | macOS Apple Silicon 与 Intel、Linux x86_64 与 ARM64、Windows x86_64 的候选包，各包均内置 SVN 后台 |
 | **Wu Plus publish** | 手动发布已验收的完整候选 | GitHub Releases 及应用内更新使用的正式资产 |
 
-快速验收只运行 Apple Silicon 的 SVN 集成测试并打包开发版，省去 DMG、dSYM 和远程服务端构建。解压后用下面的命令启动独立配置，即可验收内置 SVN。
+快速验收默认运行 5 个构建任务，覆盖 macOS Apple Silicon 和 Intel、Linux x86_64 和 ARM64、Windows x86_64。每个任务先运行真实 SVN 集成测试，再打包 `Wu Plus Dev`，从 App、解压后的 Linux 包或实际安装的 Windows 目录验证内置 SVN 后台的协议握手和取消操作。验收构建省去远程服务端，macOS 使用临时签名并以 ZIP 提供。需要验证图形界面时，从运行详情的 **Artifacts** 下载对应包，在目标机器上用独立配置打开演示工作区。
+
+macOS 解压 `Wu-Plus-Dev-arm64.zip` 或 `Wu-Plus-Dev-x86_64.zip` 后启动。
 
 ~~~bash
 open -n "/path/to/Wu Plus Dev.app" --args --user-data-dir "$HOME/.wu-plus-verify"
 ~~~
 
-Apple Silicon 快速验收和 macOS Apple Silicon、macOS Intel、Windows x86_64 正式候选各有独立的 Rust 编译缓存。手动运行时可用 `rust_cache` 切换缓存，比较同一提交的构建耗时。测热缓存时确认缓存已命中，并单独记录缓存恢复、保存和排队时间。 [快速验收配置](../.github/workflows/wu-plus-verify-macos.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
+Linux 解压匹配架构的 `wu-plus-dev-linux-<架构>.tar.gz`，在解压目录运行。
+
+~~~bash
+./wu-plus-dev.app/bin/wu-plus --user-data-dir "$HOME/.wu-plus-verify"
+~~~
+
+Windows 运行 `Wu-Plus-Dev-x86_64.exe` 安装后，在 PowerShell 中将下面的程序路径替换为实际安装路径。
+
+~~~powershell
+& 'C:\path\to\Wu Plus Dev\Wu.exe' --user-data-dir "$env:LOCALAPPDATA\WuPlusVerify"
+~~~
+
+快速验收按平台和架构使用独立的 Rust 缓存。正式候选的 macOS Apple Silicon、macOS Intel 和 Windows x86_64 使用自己的缓存。手动运行时可用 `rust_cache` 切换缓存。比较同一提交的冷、热构建时，确认缓存是否命中，并记录缓存恢复、保存和排队时间。 [快速验收配置](../.github/workflows/wu-plus-verify.yml) · [候选配置](../.github/workflows/wu-plus-candidate.yml)
 
 ### 跟进 Wu 上游
 

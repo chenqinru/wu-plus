@@ -2,7 +2,8 @@
 Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
-    [Parameter()][Alias('a')][string]$Architecture
+    [Parameter()][Alias('a')][string]$Architecture,
+    [Parameter()][switch]$AppOnly
 )
 
 # https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
@@ -39,10 +40,11 @@ function Get-VSArch {
 $target = "$Architecture-pc-windows-msvc"
 
 if ($Help) {
-    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-Install] [-Help]"
+    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-AppOnly] [-Install] [-Help]"
     Write-Output "Build the installer for Windows."
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
+    Write-Output "  -AppOnly          Skip building and packaging the remote server."
     Write-Output "  -Install, -i      Run the installer after building."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
@@ -92,9 +94,11 @@ function GenerateLicenses {
 function BuildWuAndItsFriends {
     Write-Output "Building Wu and its friends, for channel: $channel"
     cargo --config .cargo/bundle-config.toml build --release --package wu --package cli --package auto_update_helper --target $target
+    cargo build --locked --release --manifest-path plugin/Cargo.toml --target $target --target-dir target
     Copy-Item -Path ".\$CargoOutDir\wu.exe" -Destination "$innoDir\Wu.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\wu-plus-subversion-provider.exe" -Destination "$innoDir\wu-plus-subversion-provider.exe" -Force
     switch ($channel) {
         "stable" {
             cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
@@ -263,7 +267,9 @@ Push-Location $workspace
 PrepareForBundle
 GenerateLicenses
 BuildWuAndItsFriends
-BuildRemoteServer
+if (-not $AppOnly) {
+    BuildRemoteServer
+}
 MakeAppx
 DownloadAMDGpuServices
 DownloadConpty

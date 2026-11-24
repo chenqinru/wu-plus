@@ -16,7 +16,18 @@ use std::{
 use util::command::{Child, Stdio, new_command};
 
 const VERSION: u64 = 2;
+#[cfg(not(windows))]
 pub(super) const EXECUTABLE_NAME: &str = "wu-plus-subversion-provider";
+#[cfg(windows)]
+pub(super) const EXECUTABLE_NAME: &str = "wu-plus-subversion-provider.exe";
+
+pub(super) fn bundled_executable(_cx: &gpui::App) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let executable = _cx.path_for_auxiliary_executable(EXECUTABLE_NAME).ok()?;
+    #[cfg(not(target_os = "macos"))]
+    let executable = std::env::current_exe().ok()?.with_file_name(EXECUTABLE_NAME);
+    executable.is_file().then_some(executable)
+}
 
 pub(super) fn development_executable(extension_dir: &Path) -> Result<PathBuf, Error> {
     let canonical = |path: &Path| {

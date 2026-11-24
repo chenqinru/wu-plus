@@ -11,9 +11,12 @@ Build a release .tar.gz for Linux.
 
 Options:
   -h, --help     Display this help and exit.
+  --app-only    Skip building and packaging the remote server.
   --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
   "
 }
+
+app_only=false
 
 # Parse all arguments manually
 while [[ $# -gt 0 ]]; do
@@ -21,6 +24,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             help_info
             exit 0
+            ;;
+        --app-only)
+            app_only=true
+            shift
             ;;
         --flatpak)
             export ZED_BUNDLE_TYPE=flatpak
@@ -59,15 +66,10 @@ host_line=$(echo "$version_info" | grep host)
 target_triple=${host_line#*: }
 musl_triple=${target_triple%-gnu}-musl
 remote_server_triple=${REMOTE_SERVER_TARGET:-"${musl_triple}"}
-rustup_installed=false
-if command -v rustup >/dev/null 2>&1; then
-    rustup_installed=true
-fi
-
 # Generate the licenses first, so they can be baked into the binaries
 script/generate-licenses
 
-if "$rustup_installed"; then
+if [[ "$app_only" == false ]] && command -v rustup >/dev/null 2>&1; then
     rustup target add "$remote_server_triple"
 fi
 
@@ -96,27 +98,32 @@ if [[ "$(uname -m)" != "aarch64" ]]; then
 fi
 cargo --config .cargo/bundle-config.toml rustc --release --target "${target_triple}" --package wu --bin wu -- -C linker="$CC" -C link-arg=-fuse-ld=lld ${icf_args[@]+"${icf_args[@]}"}
 cargo --config .cargo/bundle-config.toml build --release --target "${target_triple}" --package cli
-# Build remote_server in separate invocation to prevent feature unification from other crates
-# from influencing dynamic libraries required by it.
-if [[ "$remote_server_triple" == "$musl_triple" ]]; then
-    export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
-    musl_cc_var="CC_$(echo "$remote_server_triple" | tr '-' '_')"
-    export "$musl_cc_var"=musl-gcc
+cargo build --locked --release --manifest-path plugin/Cargo.toml --target "$target_triple" --target-dir "$target_dir"
+
+if [[ "$app_only" == false ]]; then
+    if [[ "$remote_server_triple" == "$musl_triple" ]]; then
+        export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
+        musl_cc_var="CC_$(echo "$remote_server_triple" | tr '-' '_')"
+        export "$musl_cc_var"=musl-gcc
+    fi
+    # Build remote_server separately to avoid changing its dynamic dependencies through feature unification.
+    cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
 fi
-cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
 
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
 llvm-objcopy --strip-unneeded "${target_dir}/${target_triple}/release/wu"
 llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli"
-llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote_server"
 
-# Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
-if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q 'libcrypto\|libssl'; then
-    if [[ "$remote_server_triple" == *-musl ]]; then
-        echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
-    else
-        echo "Info: Using non-musl remote-server build."
+if [[ "$app_only" == false ]]; then
+    remote_server="${target_dir}/${remote_server_triple}/release/remote_server"
+    llvm-objcopy --strip-debug --discard-all "$remote_server"
+    if ldd "$remote_server" | grep -q 'libcrypto\|libssl'; then
+        if [[ "$remote_server_triple" == *-musl ]]; then
+            echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
+        else
+            echo "Info: Using non-musl remote-server build."
+        fi
     fi
 fi
 
@@ -137,6 +144,7 @@ if [[ ${ZED_BUNDLE_TYPE:-} == flatpak ]]; then
   cli_name=wu
 fi
 cp "${target_dir}/${target_triple}/release/wu" "${wu_dir}/libexec/wu-editor"
+install -m 755 "${target_dir}/${target_triple}/release/wu-plus-subversion-provider" "${wu_dir}/libexec/"
 cp "${target_dir}/${target_triple}/release/cli" "${wu_dir}/bin/$cli_name"
 
 # Libs
@@ -188,4 +196,6 @@ arch=$(uname -m)
 archive="wu-plus-linux-${arch}.tar.gz"
 tar -czvf "${target_dir}/release/$archive" -C "$temp_dir" "wu-plus$suffix.app"
 
-gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/wu-remote-server-linux-${arch}.gz"
+if [[ "$app_only" == false ]]; then
+    gzip -f --stdout --best "$remote_server" > "${target_dir}/wu-remote-server-linux-${arch}.gz"
+fi

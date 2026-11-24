@@ -446,7 +446,7 @@ impl SvnPanel {
                             })
                     }),
             )
-            .when(auth, |element| {
+            .when(cfg!(target_os = "macos") && auth, |element| {
                 element.child(
                     h_flex()
                         .gap_1()

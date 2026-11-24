@@ -26,6 +26,8 @@
   "Enable Subversion": "启用 Subversion",
   "Enable Subversion integration for local workspaces.": "为本地工作区启用 Subversion 集成。",
   "Install Subversion 1.14 or newer (brew install subversion).": "请安装 Subversion 1.14 或更新版本（brew install subversion），然后重新检测。",
+  "Install Subversion 1.14 or newer using your package manager (for example, sudo apt install subversion).": "请使用系统包管理器安装 Subversion 1.14 或更新版本（例如 sudo apt install subversion），然后重新检测。",
+  "Install a Subversion 1.14 or newer command-line client (such as SlikSVN) and make sure svn.exe is on PATH.": "请安装 Subversion 1.14 或更新版本的命令行客户端（例如 SlikSVN），确认 svn.exe 在 PATH 中，然后重新检测。",
   "Ignored": "已忽略",
   "Include Externals": "包含 Externals",
   "Include in SVN Commit": "纳入 SVN 提交",

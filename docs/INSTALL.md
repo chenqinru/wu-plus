@@ -1,12 +1,12 @@
 # Wu Plus 安装与使用
 
-正式包发布后可在 Wu Plus 的 GitHub Releases 下载。首发验收期间，从对应候选运行的 **Artifacts** 下载，优先选择包含所需平台和架构的产物。 [Wu Plus Releases](https://github.com/chenqinru/wu-plus/releases) · [构建与验收入口](MAINTAINING.md#github-actions)
+正式包发布后可在 Wu Plus 的 GitHub Releases 下载。首发验收期间，从 **Wu Plus verify** 或 **Wu Plus candidate** 运行详情的 **Artifacts** 下载匹配平台和架构的包。下载 `Wu Plus Dev` 验收包后，可用独立配置启动。 [Wu Plus Releases](https://github.com/chenqinru/wu-plus/releases) · [验收包启动方式](MAINTAINING.md#github-actions)
 
 ## 安装 IDE
 
 ### macOS
 
-Apple Silicon 下载 `Wu-Plus-aarch64.dmg`，Intel 下载 `Wu-Plus-x86_64.dmg`。打开 DMG，将 `Wu Plus.app` 拖入「应用程序」。如果手上是快速验收产物 `Wu-Plus-Dev-arm64.zip`，解压后按独立配置的方式启动。 [快速验收](MAINTAINING.md#github-actions)
+Apple Silicon 下载 `Wu-Plus-aarch64.dmg`，Intel 下载 `Wu-Plus-x86_64.dmg`。打开 DMG，将 `Wu Plus.app` 拖入「应用程序」。
 
 从终端打开项目时，在 Wu Plus 菜单选择「安装命令行工具」。安装完成后可运行 `wu-plus <项目路径>`。
 
@@ -26,7 +26,13 @@ WU_BUNDLE_PATH="/path/to/wu-plus-linux-x86_64.tar.gz" sh script/install.sh
 
 ## 启用 Subversion
 
-Wu Plus 在 macOS 本地工作区自动检测 SVN 工作副本，按需启动 App 内置的后台。后台使用系统的 SVN 1.14 或更新版本。使用 Homebrew 时运行 `brew install subversion`。如果 IDE 提示缺少兼容版本，安装后在 SVN 面板点「重试」重新检测。可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
+Wu Plus 在 macOS、Windows 和 Linux 的本地工作区自动检测 SVN 工作副本，按需启动随 IDE 安装的后台。后台调用系统的 SVN 1.14 或更新版本，可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
+
+- macOS 使用 Homebrew 时运行 `brew install subversion`。
+- Windows 安装 SlikSVN 等命令行客户端，确认 `svn.exe` 在 PATH 中。使用中文文件名时，客户端的系统代码页需要能表示这些字符。IDE 可以在英文系统上提交中文说明。
+- Linux 使用发行版的包管理器安装 `subversion`，例如 Debian 和 Ubuntu 上的 `sudo apt install subversion`。
+
+如果 SVN 面板提示缺少兼容版本，安装后点「重试」重新检测。Windows 上若刚修改 PATH，可重启 Wu Plus 以加载新的环境变量。
 
 打开包含 SVN 工作副本的项目，点活动栏的 SVN 图标，也可在命令面板运行「切换 SVN 面板」。用更改面板底部或历史面板顶部的工作副本名称切换仓库。在「设置 → 版本控制 → Subversion（SVN）」关闭「启用 Subversion」可停用 SVN。
 
@@ -35,7 +41,7 @@ Wu Plus 在 macOS 本地工作区自动检测 SVN 工作副本，按需启动 Ap
 ### 差异、提交和历史
 
 - 在「更改」中点文件查看单文件 Diff，可切换左右对比或统一视图，跳到差异块并直接编辑工作文件。点「查看差异」打开当前工作副本的差异汇总。
-- 勾选要提交的变更并填写说明。也可点击提交框左下角的星形按钮，或在提交框按 `Option+Tab`，让已配置的智能体根据所选变更生成说明。每个工作副本有独立的会话草稿。勾选移动后的文件时，原路径会一并选中。
+- 勾选要提交的变更并填写说明。也可点击提交框左下角的星形按钮，让已配置的智能体根据所选变更生成说明。提交框内的默认快捷键为 macOS 上的 `Option+Tab`，以及 Windows 和 Linux 上的 `Alt+L`。每个工作副本有独立的会话草稿。勾选移动后的文件时，原路径会一并选中。
 - 未跟踪文件先点行尾 `+`。缺失文件可登记删除。提交新目录中的文件时会加入必要的目录节点。
 - 「历史记录」可以展开修订并查看其中的文件 Diff。面板右下角的日志图标会在编辑区打开完整日志。
 
@@ -49,7 +55,7 @@ Wu Plus 在 macOS 本地工作区自动检测 SVN 工作副本，按需启动 Ap
 
 在「设置 → 版本控制 → Subversion（SVN）」中可以调整编辑器变更标记、行内 Blame 和 Blame 栏。变更标记与行内 Blame 默认启用。编辑器右上角的开关可临时调整当前标签页的 Blame 显示。
 
-SVN 沿用用户的 SVN 配置、认证缓存和 SSH Agent。认证失败时，可在工作副本的「SVN 凭据」中填写账号密码，并选择保存到 macOS 钥匙串。已保存的账号可以留空密码来读取钥匙串。检出表单也可填写凭据。证书验证失败时，在内置终端按 SVN 提示核对服务器指纹，确认信任后重试。
+SVN 沿用用户的 SVN 配置、认证缓存和 SSH Agent。可在「SVN 凭据」或检出表单中输入当前会话使用的账号密码。macOS 还可以选择保存到钥匙串，下次输入同一账号后留空密码即可读取。Windows 和 Linux 的跨会话认证由系统 SVN 客户端管理。证书验证失败时，在内置终端按 SVN 提示核对服务器指纹，确认信任后重试。
 
 ## 设置和应用更新
 

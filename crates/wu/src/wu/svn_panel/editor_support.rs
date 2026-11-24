@@ -217,7 +217,7 @@ fn svn_path(absolute: &Path) -> Option<(PathBuf, String)> {
             return None;
         }
         if directory.join(".svn").is_dir() {
-            let path = absolute.strip_prefix(directory).ok()?.to_str()?.to_owned();
+            let path = super::svn_path_string(absolute.strip_prefix(directory).ok()?)?;
             return Some((directory.to_owned(), path));
         }
     }

@@ -160,6 +160,10 @@ jobs:
           persist-credentials: false
       - name: Install dependencies
         run: script/linux
+      - name: Test Subversion backend
+        run: |
+          sudo apt-get install -y subversion
+          cargo test --locked --manifest-path plugin/Cargo.toml
       - name: Bundle as upstream Wu
         env:
           TARGET_ARCH: ${{ matrix.arch }}
@@ -192,6 +196,15 @@ jobs:
         with:
           key: wu-plus-candidate-windows-x86_64
           cache-bin: false
+      - name: Test Subversion backend
+        shell: pwsh
+        run: |
+          choco install sliksvn --version=1.14.5 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:Path = "${env:ProgramFiles}\SlikSvn\bin;$env:Path"
+          svn --version --quiet
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path plugin/Cargo.toml
       - name: Bundle as upstream Wu
         run: script/bundle-windows.ps1 -Architecture x86_64
         shell: pwsh

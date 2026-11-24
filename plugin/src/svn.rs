@@ -89,6 +89,41 @@ fn peg(value: impl AsRef<std::ffi::OsStr>) -> OsString {
     target
 }
 
+fn literal_local_target(value: impl AsRef<std::ffi::OsStr>) -> OsString {
+    let mut target = value.as_ref().to_os_string();
+    // SVN searches for a peg revision before canonicalizing the path. A final
+    // slash-delimited component keeps an embedded @ out of that search.
+    if cfg!(windows) && target.as_encoded_bytes().contains(&b'@') {
+        target.push("/.");
+    }
+    target
+}
+
+fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    let path = dunce::canonicalize(path)?;
+    #[cfg(windows)]
+    if let Some(share) = path
+        .to_str()
+        .and_then(|path| path.strip_prefix(r"\\?\UNC\"))
+    {
+        return Ok(PathBuf::from(format!(r"\\{share}")));
+    }
+    Ok(path)
+}
+
+fn is_working_copy_component(part: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        return part.to_str().is_some_and(|part| {
+            !part.eq_ignore_ascii_case(".svn") && !part.ends_with(['.', ' ']) && !part.contains(':')
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        part != ".svn"
+    }
+}
+
 fn revision(value: &str) -> Result<&str> {
     if value == "HEAD" || (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())) {
         Ok(value)
@@ -285,7 +320,7 @@ fn info(path: &Path, cancellation: &Cancellation) -> Result<WorkingCopy> {
         .find(|node| node.has_tag_name("repository"))
         .ok_or_else(|| invalid("The working copy has no repository information."))?;
     Ok(WorkingCopy {
-        root: fs::canonicalize(root)?,
+        root: canonicalize(root)?,
         url: text(entry, "url").unwrap_or_default().to_owned(),
         repository_url: text(repository, "root").unwrap_or_default().to_owned(),
         uuid: text(repository, "uuid").unwrap_or_default().to_owned(),
@@ -297,7 +332,7 @@ fn root_info(root: &Path, cancellation: &Cancellation) -> Result<WorkingCopy> {
     if !root.is_absolute() {
         return Err(invalid("An absolute SVN working copy root is required."));
     }
-    let actual = fs::canonicalize(root)?;
+    let actual = canonicalize(root)?;
     let copy = info(&actual, cancellation)?;
     if copy.root != actual {
         return Err(invalid("Select a working copy root."));
@@ -313,7 +348,7 @@ fn file_target(root: &Path, path: &str) -> Result<PathBuf> {
     if relative.as_os_str().is_empty()
         || relative
             .components()
-            .any(|component| !matches!(component, Component::Normal(part) if part != ".svn"))
+            .any(|component| !matches!(component, Component::Normal(part) if is_working_copy_component(part)))
     {
         return Err(invalid(
             "The selected path is outside the working copy or points into SVN metadata.",
@@ -326,7 +361,7 @@ fn file_target(root: &Path, path: &str) -> Result<PathBuf> {
             break;
         }
         match fs::symlink_metadata(parent) {
-            Ok(metadata) if metadata.file_type().is_symlink() || parent.join(".svn").is_dir() => {
+            Ok(metadata) if metadata.is_symlink() || parent.join(".svn").is_dir() => {
                 return Err(invalid(
                     "The selected path crosses into a different working copy or a symlink.",
                 ));
@@ -345,7 +380,7 @@ fn file_target(root: &Path, path: &str) -> Result<PathBuf> {
 }
 
 fn write_lock(root: &Path, cancellation: &Cancellation) -> Result<File> {
-    let normalized = fs::canonicalize(root)?;
+    let normalized = canonicalize(root)?;
     let locks_dir = std::env::temp_dir().join("wu-plus-subversion-locks");
     fs::create_dir_all(&locks_dir)?;
     use std::hash::{DefaultHasher, Hash, Hasher};
@@ -419,11 +454,9 @@ pub fn verify_certificate(address: &str) -> Result<i32> {
             "Certificate verification requires an HTTPS SVN URL.",
         ));
     }
-    let status = std::process::Command::new(process::executable()?)
-        .env("LC_ALL", "C.UTF-8")
-        .args(["info", "--force-interactive", "--"])
-        .arg(peg(address))
-        .status()?;
+    let mut args = flags(&["info", "--force-interactive", "--"]);
+    args.push(peg(address));
+    let status = process::command(&args)?.status()?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -433,11 +466,8 @@ pub fn resolve_interactively(root: &Path, path: &str) -> Result<i32> {
     let copy = root_info(root, &cancellation)?;
     let _lock = write_lock(&copy.root, &cancellation)?;
     let target = file_target(&copy.root, path)?;
-    let status = std::process::Command::new(process::executable()?)
-        .current_dir(&copy.root)
-        .env("LC_ALL", "C.UTF-8")
-        .args(["resolve", "--depth", "empty", "--force-interactive", "--"])
-        .arg(peg(target))
-        .status()?;
+    let mut args = flags(&["resolve", "--depth", "empty", "--force-interactive", "--"]);
+    args.push(peg(target));
+    let status = process::command(&args)?.current_dir(&copy.root).status()?;
     Ok(status.code().unwrap_or(1))
 }

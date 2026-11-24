@@ -7145,7 +7145,7 @@ fn terminal_page() -> SettingsPage {
 
 fn version_control_page() -> SettingsPage {
     fn svn_section() -> Vec<SettingsPageItem> {
-        if !cfg!(target_os = "macos") {
+        if !cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows")) {
             return Vec::new();
         }
         vec![

@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use settings::{Settings, SettingsStore};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -222,6 +222,20 @@ impl Provider {
 }
 
 const EXTENSION_ID: &str = "wu-plus-subversion";
+
+fn svn_path_string(path: &Path) -> Option<String> {
+    let path = path.to_str()?;
+    Some(if cfg!(windows) { path.replace('\\', "/") } else { path.to_owned() })
+}
+
+fn svn_install_hint() -> SharedString {
+    #[cfg(target_os = "macos")]
+    return t!("Install Subversion 1.14 or newer (brew install subversion).");
+    #[cfg(target_os = "linux")]
+    return t!("Install Subversion 1.14 or newer using your package manager (for example, sudo apt install subversion).");
+    #[cfg(target_os = "windows")]
+    return t!("Install a Subversion 1.14 or newer command-line client (such as SlikSVN) and make sure svn.exe is on PATH.");
+}
 
 fn has_svn_working_copy(roots: &[PathBuf]) -> bool {
     let mut directories = Vec::new();
@@ -527,9 +541,7 @@ impl SvnPanel {
         if !self.project.read(cx).is_local() || !ProjectSettings::get_global(cx).svn.enabled {
             return None;
         }
-        if let Ok(executable) = cx.path_for_auxiliary_executable(rpc::EXECUTABLE_NAME)
-            && executable.is_file()
-        {
+        if let Some(executable) = rpc::bundled_executable(cx) {
             return Some(Provider::Bundled(executable));
         }
         let store = store?.read(cx);
@@ -798,8 +810,7 @@ impl SvnPanel {
                         this.history_requests.clear();
                         this.scan_error = Some(match error.kind.as_str() {
                             "svn_unavailable" | "svn_version" => {
-                                t!("Install Subversion 1.14 or newer (brew install subversion).")
-                                    .to_string()
+                                svn_install_hint().to_string()
                             }
                             _ => error.message,
                         });
@@ -1764,7 +1775,7 @@ impl SvnPanel {
                     .project
                     .read(cx)
                     .absolute_path(&item.project_path(cx)?, cx)?;
-                path.strip_prefix(root).ok()?.to_str().map(str::to_owned)
+                svn_path_string(path.strip_prefix(root).ok()?)
             })
             .unwrap_or_else(|| ".".into())
     }
@@ -1978,21 +1989,18 @@ impl SvnPanel {
                 return;
             }
         };
-        fn quote(value: &str) -> String {
-            format!("'{}'", value.replace('\'', "'\"'\"'"))
-        }
         let terminal_task = SpawnInTerminal {
             id: TaskId(format!("wu-plus-subversion:{operation}")),
             full_label: title.to_string(),
             label: title.to_string(),
-            command: Some(quote(&binary.to_string_lossy())),
-            args: std::iter::once(operation.to_owned())
-                .chain(args.iter().map(|arg| quote(arg)))
-                .collect(),
             cwd: self.selected_root.clone(),
             reveal: RevealStrategy::Always,
             use_new_terminal: true,
-            shell: Shell::Program("/bin/sh".into()),
+            shell: Shell::WithArguments {
+                program: binary.to_string_lossy().into_owned(),
+                args: std::iter::once(operation.to_owned()).chain(args).collect(),
+                title_override: None,
+            },
             ..Default::default()
         };
         let task = terminal.update(cx, |panel, cx| panel.spawn_task(&terminal_task, window, cx));

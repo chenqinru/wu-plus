@@ -1164,7 +1164,7 @@ impl WorkingCopyDiff {
         Some(if path.as_os_str().is_empty() {
             ".".into()
         } else {
-            path.to_str()?.to_owned()
+            super::svn_path_string(path)?
         })
     }
 

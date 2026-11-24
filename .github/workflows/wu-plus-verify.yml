@@ -1,0 +1,210 @@
+name: Wu Plus verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: '选择要验收的平台'
+        type: choice
+        default: all
+        options:
+          - all
+          - macos
+          - linux
+          - windows
+      rust_cache:
+        description: '使用 Rust 构建缓存'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wu-plus-verify-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_LTO: 'false'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  ZED_RELEASE_CHANNEL: dev
+
+jobs:
+  verify-macos:
+    name: Verify macOS (${{ matrix.arch }})
+    if: inputs.platform == 'all' || inputs.platform == 'macos'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$ARCH"
+          brew install lld cmake pkgconf subversion
+      - name: Cache Rust build dependencies
+        if: inputs.rust_cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wu-plus-verify-${{ matrix.target }}
+          cache-bin: false
+      - name: Test Subversion backend
+        run: cargo test --locked --manifest-path plugin/Cargo.toml
+      - name: Build verification app
+        env:
+          TARGET: ${{ matrix.target }}
+        run: script/bundle-mac -a "$TARGET"
+      - name: Verify and archive the app with built-in Subversion
+        timeout-minutes: 5
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          app="$PWD/target/$TARGET/release/bundle/osx/Wu Plus Dev.app"
+          codesign --verify --deep --strict "$app"
+          export WU_PLUS_VERIFY_PROVIDER="$app/Contents/MacOS/wu-plus-subversion-provider"
+          cargo test --locked --manifest-path plugin/Cargo.toml --test real_svn -- provider_handshake_and_cancellation_use_stdio --exact
+          artifact_dir="$RUNNER_TEMP/verification"
+          mkdir -p "$artifact_dir"
+          ditto -c -k --keepParent "$app" "$artifact_dir/Wu-Plus-Dev-$ARCH.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-verify-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/verification/Wu-Plus-Dev-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  verify-linux:
+    name: Verify Linux (${{ matrix.arch }})
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$ARCH"
+          script/linux
+          sudo apt-get install -y subversion
+      - name: Cache Rust build dependencies
+        if: inputs.rust_cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wu-plus-verify-linux-${{ matrix.arch }}
+          cache-bin: false
+      - name: Test Subversion backend
+        run: cargo test --locked --manifest-path plugin/Cargo.toml
+      - name: Build verification archive
+        run: script/bundle-linux --app-only
+      - name: Verify the archive with built-in Subversion
+        timeout-minutes: 5
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          artifact_dir="$RUNNER_TEMP/verification"
+          mkdir -p "$artifact_dir"
+          archive="$artifact_dir/wu-plus-dev-linux-$ARCH.tar.gz"
+          mv "target/release/wu-plus-linux-$ARCH.tar.gz" "$archive"
+          tar -xzf "$archive" -C "$artifact_dir"
+          binaries="$artifact_dir/wu-plus-dev.app/libexec"
+          test -x "$binaries/wu-editor"
+          export WU_PLUS_VERIFY_PROVIDER="$binaries/wu-plus-subversion-provider"
+          cargo test --locked --manifest-path plugin/Cargo.toml --test real_svn -- provider_handshake_and_cancellation_use_stdio --exact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-verify-linux-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/verification/wu-plus-dev-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  verify-windows:
+    name: Verify Windows (x86_64)
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Subversion
+        run: |
+          choco install sliksvn --version=1.14.5 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $svnBin = Join-Path $env:ProgramFiles 'SlikSvn\bin'
+          & "$svnBin\svn.exe" --version --quiet
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $svnBin >> $env:GITHUB_PATH
+      - name: Cache Rust build dependencies
+        if: inputs.rust_cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wu-plus-verify-windows-x86_64
+          cache-bin: false
+      - name: Test Subversion backend
+        run: cargo test --locked --manifest-path plugin/Cargo.toml
+      - name: Build verification installer
+        run: script/bundle-windows.ps1 -Architecture x86_64 -AppOnly
+      - name: Verify the installer with built-in Subversion
+        timeout-minutes: 5
+        run: |
+          $installer = 'target/Wu-Plus-Dev-x86_64.exe'
+          Move-Item -Path 'target/Wu-Plus-x86_64.exe' -Destination $installer
+          $app = Join-Path $env:RUNNER_TEMP 'Wu Plus Dev'
+          $log = Join-Path $env:RUNNER_TEMP 'wu-plus-install.log'
+          $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+            '/MERGETASKS=!addcontextmenufiles,!addcontextmenufolders,!associatewithfiles,!addtopath',
+            "/DIR=`"$app`"", "/LOG=`"$log`"")
+          $setup = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+          if ($setup.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log -Tail 50 }
+            throw "Wu Plus Dev installer exited with code $($setup.ExitCode)"
+          }
+          if (-not (Test-Path "$app\Wu.exe" -PathType Leaf)) { throw 'Wu.exe is missing from the installation' }
+          $env:WU_PLUS_VERIFY_PROVIDER = Join-Path $app 'wu-plus-subversion-provider.exe'
+          cargo test --locked --manifest-path plugin/Cargo.toml --test real_svn -- provider_handshake_and_cancellation_use_stdio --exact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wu-plus-verify-windows-x86_64-${{ github.sha }}
+          path: target/Wu-Plus-Dev-x86_64.exe
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7

@@ -151,6 +151,29 @@ fn with_revision(mut args: Vec<OsString>, revision_value: Option<&str>) -> Resul
     Ok(args)
 }
 
+fn with_message(
+    mut args: Vec<OsString>,
+    value: &str,
+    argument_file: &mut Option<tempfile::NamedTempFile>,
+) -> Result<Vec<OsString>> {
+    if cfg!(windows) && !value.is_ascii() {
+        use std::io::Write as _;
+        // Windows SVN decodes command-line arguments through the system code page.
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(value.as_bytes())?;
+        args.extend([
+            "--file".into(),
+            file.path().as_os_str().into(),
+            "--encoding".into(),
+            "UTF-8".into(),
+        ]);
+        *argument_file = Some(file);
+    } else {
+        args.extend(["--message".into(), value.into()]);
+    }
+    Ok(args)
+}
+
 pub(super) fn commit_scope(
     copy: &WorkingCopy,
     paths: Vec<String>,
@@ -250,7 +273,7 @@ fn checkout(
         .parent()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| invalid("Choose an absolute checkout destination."))?;
-    let parent = fs::canonicalize(parent)?;
+    let parent = canonicalize(parent)?;
     let destination = parent.join(name);
     let _lock = write_lock(&parent, cancellation)?;
     match fs::symlink_metadata(&destination) {
@@ -271,7 +294,7 @@ fn checkout(
     let result = command(
         Some(&parent),
         args,
-        vec![peg(address), destination.clone().into_os_string()],
+        vec![peg(address), literal_local_target(&destination)],
         auth,
         Some(address),
         cancellation,
@@ -319,7 +342,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
         cancellation,
     )?;
     let _lock = write_lock(&copy.root, cancellation)?;
-    let mut property_file = None;
+    let mut argument_file = None;
     let (args, targets, touches_server) = match action {
         Operation::Update {
             revision,
@@ -349,7 +372,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
             }
             (
                 flags(&["move"]),
-                vec![peg(source), destination.into_os_string()],
+                vec![peg(source), literal_local_target(destination)],
                 false,
             )
         }
@@ -367,7 +390,11 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
             paths,
             message: value,
         } => (
-            flags(&["commit", "--depth", "empty", "--message", message(&value)?]),
+            with_message(
+                flags(&["commit", "--depth", "empty"]),
+                message(&value)?,
+                &mut argument_file,
+            )?,
             commit_scope(&copy, paths, cancellation)?
                 .into_iter()
                 .map(|entry| peg(copy.root.join(entry.path)))
@@ -381,7 +408,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
             revision,
         } => (
             with_revision(
-                flags(&["copy", "--message", message(&value)?]),
+                with_message(flags(&["copy"]), message(&value)?, &mut argument_file)?,
                 revision.as_deref(),
             )?,
             vec![
@@ -399,7 +426,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
             )?,
             vec![
                 repository_target(&copy, &url)?,
-                copy.root.clone().into_os_string(),
+                literal_local_target(&copy.root),
             ],
             true,
         ),
@@ -424,7 +451,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
                 args,
                 vec![
                     repository_target(&copy, &source)?,
-                    copy.root.clone().into_os_string(),
+                    literal_local_target(&copy.root),
                 ],
                 true,
             )
@@ -444,7 +471,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
                     file.path().as_os_str().into(),
                     name.into(),
                 ];
-                property_file = Some(file);
+                argument_file = Some(file);
                 (args, vec![path], false)
             } else {
                 (vec!["propdel".into(), name.into()], vec![path], false)
@@ -453,7 +480,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
         Operation::Lock { paths, message } => {
             let mut args = flags(&["lock"]);
             if let Some(message) = message {
-                args.extend(["--message".into(), message.into()]);
+                args = with_message(args, &message, &mut argument_file)?;
             }
             (args, selected(&copy.root, &paths)?, true)
         }
@@ -581,7 +608,7 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
         Some(&copy.repository_url),
         cancellation,
     );
-    drop(property_file);
+    drop(argument_file);
     match output {
         Ok(content) => {
             let warning = effective_auth

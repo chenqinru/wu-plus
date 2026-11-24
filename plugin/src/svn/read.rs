@@ -24,7 +24,7 @@ pub(super) fn discover(params: Discovery, cancellation: &Cancellation) -> Result
         if !root.is_absolute() {
             return Err(invalid("Workspace roots must be absolute paths."));
         }
-        let root = match fs::canonicalize(&root) {
+        let root = match canonicalize(&root) {
             Ok(path) => path,
             Err(error) => {
                 warnings.push(format!("{}: {error}", root.display()));
@@ -175,7 +175,12 @@ fn relative(root: &Path, path: &str) -> Option<String> {
         .components()
         .all(|part| matches!(part, Component::Normal(_)))
     {
-        return path.to_str().map(str::to_owned);
+        let path = path.to_str()?;
+        return Some(if cfg!(windows) {
+            path.replace('\\', "/")
+        } else {
+            path.to_owned()
+        });
     }
     None
 }
@@ -923,7 +928,7 @@ fn commit_diff(
             false
         };
         if !directory {
-            file_targets.push(OsString::from(&entry.path));
+            file_targets.push(literal_local_target(&entry.path));
         } else if entry.props == "modified" {
             let details = property_diff(&entry.path, "BASE".into(), "WORKING".into(), |head| {
                 if !head && entry.item == "added" && !entry.copied {
@@ -1059,7 +1064,7 @@ fn working_diff(
     } else {
         match invoke(
             flags(&["diff", "--internal-diff", "--depth", "empty"]),
-            vec![target.into_os_string()],
+            vec![literal_local_target(&target)],
         ) {
             Ok(patch) => patch,
             Err(error) if matches!(error.kind, "binary" | "output_limit") => String::new(),
@@ -1549,7 +1554,7 @@ fn conflict(
             } else {
                 copy.root.join(raw)
             };
-            if let Ok(canonical) = fs::canonicalize(&absolute)
+            if let Ok(canonical) = canonicalize(&absolute)
                 && canonical.starts_with(&copy.root)
                 && canonical
                     .metadata()
@@ -1663,7 +1668,8 @@ fn property_conflict_values(reject: &str) -> Option<[(&'static str, String); 3]>
     const LOCAL: &str = "<<<<<<< (local property value)\n";
     const BASE: &str = "||||||| (incoming 'changed from' value)\n";
     const INCOMING: &str = ">>>>>>> (incoming 'changed to' value)";
-    let mut rest = reject;
+    let reject = reject.replace("\r\n", "\n");
+    let mut rest = reject.as_str();
     let mut views = [
         ("property_base", String::new()),
         ("property_mine", String::new()),

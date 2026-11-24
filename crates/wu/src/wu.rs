@@ -6,7 +6,7 @@ pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod svn_panel;
 pub mod remote_debug;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -664,7 +664,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(chat_panel, workspace_handle.clone(), cx.clone()),
         );
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         add_panel_when_ready(
             svn_panel::SvnPanel::load(workspace_handle.clone(), cx.clone()),
             workspace_handle.clone(),

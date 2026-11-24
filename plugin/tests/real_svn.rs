@@ -7,6 +7,40 @@ use std::{
 use tempfile::TempDir;
 use wu_plus_subversion_provider::{Cancellation, handle};
 
+fn file_url(path: &Path) -> String {
+    let prefix = if cfg!(windows) { "file:///" } else { "file://" };
+    format!("{prefix}{}", encode_path(path.to_str().unwrap()))
+}
+
+fn encode_path(path: &str) -> String {
+    let mut url = String::new();
+    for byte in path.bytes() {
+        match byte {
+            b'\\' if cfg!(windows) => url.push('/'),
+            b if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) => url.push(char::from(b)),
+            b => {
+                use std::fmt::Write as _;
+                write!(url, "%{b:02X}").unwrap();
+            }
+        }
+    }
+    url
+}
+
+fn local_name(unicode: &'static str, latin: &'static str, ascii: &'static str) -> &'static str {
+    #[cfg(windows)]
+    match unsafe { windows_sys::Win32::Globalization::GetACP() } {
+        936 | 54936 | 65001 => unicode,
+        1252 => latin,
+        _ => ascii,
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (latin, ascii);
+        unicode
+    }
+}
+
 fn svn(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("svn")
         .current_dir(dir)
@@ -58,7 +92,7 @@ impl Repos {
                 .unwrap()
                 .success()
         );
-        let url = format!("file://{}", server.display());
+        let url = file_url(&server);
         svn(
             tmp.path(),
             &[
@@ -103,7 +137,7 @@ fn history_is_empty_at_revision_zero() {
     let root = tmp.path().join("empty-working-copy");
     request(
         "write",
-        json!({"operation":"checkout","url":format!("file://{}", repository.display()),"destination":root}),
+        json!({"operation":"checkout","url":file_url(&repository),"destination":root}),
     );
     let history = root_request("read", &root, json!({"operation":"history","path":"."}));
     assert_eq!(history["revisions"], json!([]));
@@ -114,53 +148,69 @@ fn history_is_empty_at_revision_zero() {
 fn discovery_and_precise_commits_cover_nested_copies_and_special_names() {
     let fixture = Repos::new();
     let root = &fixture.a;
-    let nested = root.join("embedded");
+    let directory = local_name("新目录", "café folder", "new folder");
+    let selected = format!(
+        "{directory}/{}",
+        local_name("选中 @.txt", "café @.txt", "selected @.txt")
+    );
+    let unselected = format!(
+        "{directory}/{}",
+        local_name("留在本地.txt", "café local.txt", "unselected.txt")
+    );
+    let renamed = format!(
+        "{directory}/{}",
+        local_name("改名 @.txt", "renommé @.txt", "renamed @.txt")
+    );
+    let nested = root.join("embedded @copy");
     request(
         "write",
         json!({"operation":"checkout","url":format!("{}/trunk",fixture.url),"destination":nested}),
     );
-    fs::create_dir(root.join("新目录")).unwrap();
-    fs::write(root.join("新目录/选中 @.txt"), "one\n").unwrap();
-    fs::write(root.join("新目录/留在本地.txt"), "two\n").unwrap();
+    fs::create_dir(root.join(directory)).unwrap();
+    fs::write(root.join(&selected), "one\n").unwrap();
+    fs::write(root.join(&unselected), "two\n").unwrap();
     fs::write(root.join("unchanged.txt"), "locally edited\n").unwrap();
 
     let copies = request(
         "discover",
-        json!({"roots":[fixture.tmp.path(), root.join("新目录"), &fixture.b]}),
+        json!({"roots":[fixture.tmp.path(), root.join(directory), &fixture.b]}),
     );
     let roots = copies["copies"].as_array().unwrap();
     assert_eq!(roots.len(), 3, "{copies}");
     for copy in roots {
         assert_eq!(copy["repository_url"], fixture.url);
     }
-    root_request("write", root, json!({"operation":"add","paths":["新目录"]}));
+    root_request(
+        "write",
+        root,
+        json!({"operation":"add","paths":[directory]}),
+    );
     let context = root_request(
         "read",
         root,
-        json!({"operation":"commit_diff","paths":["新目录/选中 @.txt"]}),
+        json!({"operation":"commit_diff","paths":[selected]}),
     );
     let context = context["text"].as_str().unwrap();
-    assert!(context.contains("added directory 新目录"));
-    assert!(context.contains("新目录/选中 @.txt"));
+    assert!(context.contains(&format!("added directory {directory}")));
+    assert!(context.contains(&selected));
     assert!(context.lines().any(|line| line == "+one"), "{context}");
-    assert!(!context.contains("留在本地.txt"));
+    assert!(!context.contains(&unselected));
     assert!(!context.contains("locally edited"));
     assert!(!context.contains(root.to_str().unwrap()));
 
     root_request(
         "write",
         root,
-        json!({"operation":"commit","paths":["新目录/选中 @.txt"],"message":"selected only"}),
+        json!({"operation":"commit","paths":[selected],"message":"只提交选中的文件"}),
     );
+    let history = root_request("read", root, json!({"operation":"history","path":"."}));
+    assert_eq!(history["revisions"][0]["message"], "只提交选中的文件");
     assert_eq!(
         svn(
             root,
             &[
                 "cat",
-                &format!(
-                    "{}/trunk/%E6%96%B0%E7%9B%AE%E5%BD%95/%E9%80%89%E4%B8%AD%20%40.txt@",
-                    fixture.url
-                )
+                &format!("{}/trunk/{}@", fixture.url, encode_path(&selected))
             ]
         ),
         "one\n"
@@ -168,7 +218,7 @@ fn discovery_and_precise_commits_cover_nested_copies_and_special_names() {
     assert!(
         entries(root)
             .iter()
-            .any(|entry| entry["path"] == "新目录/留在本地.txt" && entry["item"] == "added")
+            .any(|entry| entry["path"] == unselected && entry["item"] == "added")
     );
     assert!(
         entries(root)
@@ -184,27 +234,51 @@ fn discovery_and_precise_commits_cover_nested_copies_and_special_names() {
     );
     let outside = handle(
         "write",
-        json!({"operation":"delete","root":root,"paths":["embedded/text.txt"]}),
+        json!({"operation":"delete","root":root,"paths":["embedded @copy/text.txt"]}),
         &Cancellation::default(),
     )
     .unwrap_err();
     assert_eq!(outside.kind, "invalid_params");
 
+    #[cfg(windows)]
+    for path in [".SVN/wc.db", "unchanged.txt:stream"] {
+        let rejected = handle(
+            "read",
+            json!({"operation":"editor_base","root":root,"path":path}),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert_eq!(rejected.kind, "invalid_params", "{path}");
+    }
+
+    #[cfg(windows)]
+    if unsafe { windows_sys::Win32::Globalization::GetACP() } == 1252 {
+        let path = "中文路径.txt";
+        fs::write(root.join(path), "unversioned\n").unwrap();
+        let rejected = handle(
+            "write",
+            json!({"operation":"add","root":root,"paths":[path]}),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert_eq!(rejected.kind, "svn_encoding");
+    }
+
     root_request(
         "write",
         root,
-        json!({"operation":"move","path":"新目录/选中 @.txt","destination":"新目录/改名 @.txt"}),
+        json!({"operation":"move","path":selected,"destination":renamed}),
     );
     let move_entries = entries(root);
     assert!(
         move_entries
             .iter()
-            .any(|entry| entry["path"] == "新目录/改名 @.txt" && entry["item"] == "added"),
+            .any(|entry| entry["path"] == renamed && entry["item"] == "added"),
         "{move_entries:?}"
     );
     let partial_move = handle(
         "read",
-        json!({"root":root,"operation":"commit_diff","paths":["新目录/改名 @.txt"]}),
+        json!({"root":root,"operation":"commit_diff","paths":[renamed]}),
         &Cancellation::default(),
     )
     .unwrap_err();
@@ -212,20 +286,20 @@ fn discovery_and_precise_commits_cover_nested_copies_and_special_names() {
     let context = root_request(
         "read",
         root,
-        json!({"operation":"commit_diff","paths":["新目录/选中 @.txt","新目录/改名 @.txt"]}),
+        json!({"operation":"commit_diff","paths":[selected,renamed]}),
     );
     assert!(
         context["text"]
             .as_str()
             .unwrap()
-            .contains("moved 新目录/选中 @.txt -> 新目录/改名 @.txt")
+            .contains(&format!("moved {selected} -> {renamed}"))
     );
     root_request(
         "write",
         root,
-        json!({"operation":"commit","paths":["新目录/选中 @.txt","新目录/改名 @.txt"],"message":"move selected file"}),
+        json!({"operation":"commit","paths":[selected,renamed],"message":"move selected file"}),
     );
-    assert!(root.join("新目录/改名 @.txt").is_file());
+    assert!(root.join(renamed).is_file());
 }
 
 #[test]
@@ -535,7 +609,9 @@ fn update_and_resolve_text_property_and_tree_conflicts() {
 #[test]
 fn provider_handshake_and_cancellation_use_stdio() {
     use std::io::{BufRead, BufReader, Write};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wu-plus-subversion-provider"))
+    let executable = std::env::var_os("WU_PLUS_VERIFY_PROVIDER")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_wu-plus-subversion-provider").into());
+    let mut child = Command::new(executable)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -610,10 +686,13 @@ fn svnserve_authentication_failure_and_password_stdin() {
         .local_addr()
         .unwrap()
         .port();
-    let mut svnserve = Command::new("svnserve")
+    let mut command = Command::new("svnserve");
+    command.arg("-d");
+    if !cfg!(windows) {
+        command.arg("--foreground");
+    }
+    let mut svnserve = command
         .args([
-            "-d",
-            "--foreground",
             "--listen-host",
             "127.0.0.1",
             "--listen-port",
@@ -754,7 +833,7 @@ fn native_diff_snapshots_and_history_file_changes() {
         2
     );
 
-    let name = "中文 @.txt";
+    let name = local_name("中文 @.txt", "café @.txt", "new @.txt");
     fs::write(root.join(name), "added content\n").unwrap();
     root_request("write", root, json!({"operation":"add","paths":[name]}));
     let baseline = root_request("read", root, json!({"operation":"editor_base","path":name}));
