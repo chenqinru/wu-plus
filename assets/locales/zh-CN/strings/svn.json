@@ -1,5 +1,4 @@
 {
-  "Absolute Destination Path": "目标绝对路径",
   "Advanced Options": "高级选项",
   "Both sides added this path during update.": "更新时，本地和传入版本都新增了此路径。",
   "Browse SVN URL": "浏览 SVN 仓库路径",
@@ -94,7 +93,6 @@
   "SVN credentials set for this working copy. Retry the operation.": "已为此工作副本设置 SVN 凭据。请重试操作。",
   "SVN file lock": "SVN 文件锁",
   "SVN operation outcome is unknown. Refresh and verify the repository before retrying.": "SVN 操作的结果不确定。请刷新并核对仓库状态后再重试。",
-  "SVN operation completed.": "SVN 操作已完成。",
   "SVN plugin protocol is incompatible.": "SVN 插件协议版本不兼容。",
   "Save open SVN files before running this operation.": "请保存打开的 SVN 文件，再执行此操作。",
   "Save password to Keychain": "将密码保存到钥匙串",
