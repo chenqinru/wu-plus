@@ -80,13 +80,18 @@ jobs:
   bundle-macos:
     needs: discover
     if: needs.discover.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         arch: [aarch64, x86_64]
         component: [ide, remote-server]
+        include:
+          - arch: aarch64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
