@@ -694,7 +694,7 @@ fn register_actions(
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     workspace.register_action(|workspace, _: &svn_panel::TogglePanel, window, cx| {
         if workspace
             .panel::<svn_panel::SvnPanel>(cx)
@@ -1202,7 +1202,7 @@ fn initialize_pane(
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
             let file_diff_style_toolbar = cx.new(FileDiffStyleToolbar::new);
             toolbar.add_item(file_diff_style_toolbar, window, cx);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             {
                 let svn_diff_navigation =
                     cx.new(|_| svn_panel::preview::WorktreeDiffToolbar::default());
@@ -3390,6 +3390,30 @@ mod tests {
     }
 
     #[gpui::test]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    async fn test_svn_panel_toggle_action_is_registered(cx: &mut TestAppContext) {
+        let app_state = cx.update(AppState::test);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let window = AnyWindowHandle::from(window);
+        cx.update(|cx| {
+            window.update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    register_actions(app_state, workspace, window, cx);
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                let focus = workspace.focus_handle(cx);
+                assert!(window.is_action_available_in(&svn_panel::TogglePanel, &focus));
+            })
+            .unwrap()
+        });
+    }
+
+    #[gpui::test]
     async fn test_new_empty_workspace(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
         cx.update(|cx| {
@@ -5557,7 +5581,7 @@ mod tests {
                 "snippets",
                 "stash_picker",
                 "svg",
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
                 "svn",
                 "syntax_tree_view",
                 "tab_switcher",
