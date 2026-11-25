@@ -1,0 +1,17 @@
+Wu Plus packages the Slik Subversion 1.14.5 Windows client and its libraries.
+Wu Plus adds a process-level UTF-8 manifest to its private copy of svn.exe.
+
+Slik Subversion binary distribution and license notices:
+https://sliksvn.com/download/
+
+Apache Subversion 1.14.5 source and NOTICE:
+https://archive.apache.org/dist/subversion/subversion-1.14.5.tar.bz2
+
+Berkeley DB 4.4.20 source:
+https://download.oracle.com/berkeley-db/db-4.4.20.tar.gz
+
+SharpSvn build sources and dependency information:
+https://github.com/AmpScm/SharpSvn
+
+Wu Plus packaging sources, including the manifest:
+https://github.com/chenqinru/wu-plus/tree/main/script

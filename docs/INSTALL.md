@@ -26,10 +26,10 @@ WU_BUNDLE_PATH="/path/to/wu-plus-linux-x86_64.tar.gz" sh script/install.sh
 
 ## 启用 Subversion
 
-Wu Plus 在 macOS、Windows 和 Linux 的本地工作区自动检测 SVN 工作副本，按需启动随 IDE 安装的后台。后台调用系统的 SVN 1.14 或更新版本，可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
+Wu Plus 在 macOS、Windows 和 Linux 的本地工作区自动检测 SVN 工作副本，按需启动随 IDE 安装的后台。后台使用 SVN 1.14 或更新版本，可访问 `file://`、`svn://`、`svn+ssh://`、`http://` 和 `https://` 仓库。
 
 - macOS 使用 Homebrew 时运行 `brew install subversion`。
-- Windows 安装 SlikSVN 等命令行客户端，确认 `svn.exe` 在 PATH 中。使用中文文件名时，客户端的系统代码页需要能表示这些字符。IDE 可以在英文系统上提交中文说明。
+- Windows 安装包内置 SVN 命令行客户端。Windows 10 1903 及以上版本中，内置客户端使用 UTF-8 处理路径和文件名。自行编译且未打包客户端时，后台会查找兼容的系统 `svn.exe`，此时路径和文件名受系统代码页限制。
 - Linux 使用发行版的包管理器安装 `subversion`，例如 Debian 和 Ubuntu 上的 `sudo apt install subversion`。
 
 如果 SVN 面板提示缺少兼容版本，安装后点「重试」重新检测。Windows 上若刚修改 PATH，可重启 Wu Plus 以加载新的环境变量。

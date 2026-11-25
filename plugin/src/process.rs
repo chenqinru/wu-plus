@@ -1,11 +1,12 @@
 use crate::svn::RpcError;
 use std::{
+    collections::HashSet,
     ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -28,16 +29,101 @@ impl Cancellation {
     }
 }
 
-pub fn executable() -> Result<PathBuf, RpcError> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+struct Client {
+    path: PathBuf,
+    version: String,
+    #[cfg(windows)]
+    utf8: bool,
+}
+
+static CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn executable_candidates(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     let name = if cfg!(windows) { "svn.exe" } else { "svn" };
-    let from_path = std::env::split_paths(&path)
+    let from_path = std::env::split_paths(path)
         .filter(|path| path.is_absolute())
-        .map(|path| path.join(name));
-    from_path
-        .chain(system_svn_paths())
-        .find(|path| is_svn_executable(path))
-        .ok_or_else(|| RpcError::new("svn_unavailable", "Install Subversion 1.14 or newer."))
+        .map(move |path| path.join(name));
+    #[cfg(windows)]
+    let from_path = bundled_client().into_iter().chain(from_path);
+    from_path.chain(system_svn_paths())
+}
+
+#[cfg(windows)]
+fn bundled_client() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    Some(executable.parent()?.join("subversion").join("svn.exe"))
+}
+
+fn client(cancellation: &Cancellation) -> Result<&'static Client, RpcError> {
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let selection = select_client(executable_candidates(&path), cancellation)?;
+    Ok(CLIENT.get_or_init(|| selection))
+}
+
+fn select_client(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    cancellation: &Cancellation,
+) -> Result<Client, RpcError> {
+    let mut visited = HashSet::new();
+    let mut rejected = Vec::new();
+    let arguments = ["--version".into(), "--quiet".into()];
+    #[cfg(windows)]
+    let bundled = bundled_client();
+    for path in candidates {
+        cancellation.check()?;
+        if !visited.insert(path.clone()) || !is_svn_executable(&path) {
+            continue;
+        }
+        let mut client = Client {
+            #[cfg(windows)]
+            utf8: bundled.as_ref() == Some(&path) && windows::supports_utf8_manifest(),
+            path,
+            version: String::new(),
+        };
+        let result = run_client(
+            &client,
+            None,
+            &arguments,
+            None,
+            Duration::from_secs(5),
+            cancellation,
+        );
+        match result {
+            Ok(output) => {
+                let version = output.trim();
+                let mut fields = version.split('.');
+                let major = fields.next().and_then(|field| field.parse::<u32>().ok());
+                let minor = fields.next().and_then(|field| field.parse::<u32>().ok());
+                if matches!(major.zip(minor), Some(version) if version >= (1, 14)) {
+                    client.version = version.to_owned();
+                    return Ok(client);
+                }
+                rejected.push(format!("{} ({version})", client.path.display()));
+            }
+            Err(error) if error.kind == "cancelled" => return Err(error),
+            Err(error) => rejected.push(format!("{} ({})", client.path.display(), error.message)),
+        }
+    }
+    if rejected.is_empty() {
+        return Err(RpcError::new(
+            "svn_unavailable",
+            "Install Subversion 1.14 or newer.",
+        ));
+    }
+    Err(RpcError::new(
+        "svn_version",
+        format!(
+            "Subversion requires SVN 1.14 or newer. Checked {}.",
+            rejected.join("; ")
+        ),
+    ))
+}
+
+pub fn version(cancellation: &Cancellation) -> Result<&'static str, RpcError> {
+    Ok(&client(cancellation)?.version)
 }
 
 #[cfg(target_os = "macos")]
@@ -85,11 +171,41 @@ fn is_svn_executable(path: &Path) -> bool {
 const OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 
 pub(crate) fn command(args: &[OsString]) -> Result<Command, RpcError> {
-    #[cfg(windows)]
-    windows::validate_arguments(args)?;
-    let mut command = Command::new(executable()?);
-    command.args(args).env("LC_ALL", "C.UTF-8");
-    Ok(command)
+    client(&Cancellation::default())?.command(args)
+}
+
+impl Client {
+    fn command(&self, args: &[OsString]) -> Result<Command, RpcError> {
+        #[cfg(windows)]
+        if !self.utf8 {
+            windows::validate_arguments(args)?;
+        }
+        let mut command = Command::new(&self.path);
+        command.args(args).env("LC_ALL", "C.UTF-8");
+        Ok(command)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn write_target_list(
+    targets: &[OsString],
+    writer: &mut impl Write,
+    cancellation: &Cancellation,
+) -> Result<(), RpcError> {
+    let client = client(cancellation)?;
+    for target in targets {
+        let target = target.to_str().ok_or_else(binary_output)?;
+        if target.contains(['\r', '\n', '\0']) {
+            return Err(RpcError::new("invalid_params", "Invalid SVN target path."));
+        }
+        if client.utf8 {
+            writer.write_all(target.as_bytes())?;
+        } else {
+            writer.write_all(&windows::encode_argument(target.as_ref())?)?;
+        }
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 fn drain(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
@@ -114,7 +230,26 @@ pub fn run(
     cancellation: &Cancellation,
 ) -> Result<String, RpcError> {
     cancellation.check()?;
-    let mut command = command(args)?;
+    run_client(
+        client(cancellation)?,
+        cwd,
+        args,
+        password,
+        timeout,
+        cancellation,
+    )
+}
+
+fn run_client(
+    client: &Client,
+    cwd: Option<&Path>,
+    args: &[OsString],
+    password: Option<&str>,
+    timeout: Duration,
+    cancellation: &Cancellation,
+) -> Result<String, RpcError> {
+    cancellation.check()?;
+    let mut command = client.command(args)?;
     command
         .stdin(if password.is_some() {
             Stdio::piped()
@@ -212,7 +347,8 @@ pub fn run(
         Ok(output) => Ok(output),
         #[cfg(windows)]
         Err(error)
-            if !args.iter().any(|arg| arg == "--xml")
+            if !client.utf8
+                && !args.iter().any(|arg| arg == "--xml")
                 && !args.first().is_some_and(|command| command == "cat") =>
         {
             windows::decode_output(error.as_bytes()).ok_or_else(binary_output)
@@ -247,10 +383,38 @@ fn stop_and_reap(child: &mut Child) {
     }
 }
 
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+
+    #[test]
+    fn selects_the_first_compatible_subversion_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = ["broken", "old", "compatible"].map(|name| directory.path().join(name));
+        for (path, script) in paths.iter().zip([
+            "#!/bin/sh\nexit 1\n",
+            "#!/bin/sh\necho 1.9.7\n",
+            "#!/bin/sh\necho 1.14.5\n",
+        ]) {
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let selected = select_client(paths.clone(), &Cancellation::default()).unwrap();
+        assert_eq!(selected.path, paths[2]);
+        let error = select_client(paths[..2].iter().cloned(), &Cancellation::default())
+            .err()
+            .expect("all clients were rejected");
+        assert_eq!(error.kind, "svn_version");
+        assert!(error.message.contains("1.9.7"));
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use super::{Child, Command, OsString, RpcError, stop_and_reap};
     use std::{
+        ffi::OsStr,
         io,
         os::windows::{
             ffi::OsStrExt as _,
@@ -270,41 +434,65 @@ mod windows {
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
                 SetInformationJobObject,
             },
+            SystemInformation::OSVERSIONINFOW,
             Threading::CREATE_NO_WINDOW,
         },
     };
 
+    pub(super) fn supports_utf8_manifest() -> bool {
+        use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+
+        let mut version = OSVERSIONINFOW {
+            dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+            ..Default::default()
+        };
+        let status = unsafe { RtlGetVersion(&mut version) };
+        status == 0 && (version.dwMajorVersion, version.dwBuildNumber) >= (10, 18362)
+    }
+
     pub(super) fn validate_arguments(args: &[OsString]) -> Result<(), RpcError> {
-        let code_page = unsafe { GetACP() };
-        if matches!(code_page, CP_UTF8 | 54936) {
-            return Ok(());
-        }
         for argument in args
             .iter()
             .filter(|argument| !argument.as_encoded_bytes().is_ascii())
         {
-            let wide = argument.encode_wide().collect::<Vec<_>>();
-            let mut replaced = 0;
-            let size = unsafe {
-                WideCharToMultiByte(
-                    code_page,
-                    WC_NO_BEST_FIT_CHARS,
-                    wide.as_ptr(),
-                    wide.len() as i32,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null(),
-                    &mut replaced,
-                )
-            };
-            if size == 0 || replaced != 0 {
-                return Err(RpcError::new(
-                    "svn_encoding",
-                    "A path or argument contains characters outside the Windows system code page used by Subversion.",
-                ));
-            }
+            encode_argument(argument)?;
         }
         Ok(())
+    }
+
+    pub(super) fn encode_argument(argument: &OsStr) -> Result<Vec<u8>, RpcError> {
+        if argument.as_encoded_bytes().is_ascii() {
+            return Ok(argument.as_encoded_bytes().to_vec());
+        }
+        let code_page = unsafe { GetACP() };
+        let wide = argument.encode_wide().collect::<Vec<_>>();
+        let mut encoded = vec![0; wide.len() * 4];
+        let mut replaced = 0;
+        let (flags, replaced_ptr) = if matches!(code_page, CP_UTF8 | 54936) {
+            (0, ptr::null_mut())
+        } else {
+            (WC_NO_BEST_FIT_CHARS, &mut replaced as *mut _)
+        };
+        let written = unsafe {
+            WideCharToMultiByte(
+                code_page,
+                flags,
+                wide.as_ptr(),
+                wide.len() as i32,
+                encoded.as_mut_ptr(),
+                encoded.len() as i32,
+                ptr::null(),
+                replaced_ptr,
+            )
+        };
+        if written == 0 || replaced != 0 {
+            return Err(RpcError::new(
+                "svn_encoding",
+                "This SVN client cannot represent the path or argument with the Windows system code page. Use the Subversion client bundled with Wu Plus.",
+            ));
+        }
+        encoded.truncate(written as usize);
+        Ok(encoded)
     }
 
     pub(super) fn spawn(mut command: Command) -> io::Result<(Child, OwnedHandle)> {

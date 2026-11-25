@@ -67,6 +67,7 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 [Files]
 Source: "{#ResourcesDir}\Wu.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\wu-plus-subversion-provider.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+Source: "{#ResourcesDir}\subversion\*"; DestDir: "{code:GetInstallDir}\subversion"; Flags: ignoreversion recursesubdirs
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#ResourcesDir}\file_icons\*"; DestDir: "{app}\resources\file_icons"; Flags: ignoreversion

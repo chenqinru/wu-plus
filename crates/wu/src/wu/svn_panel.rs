@@ -856,9 +856,7 @@ impl SvnPanel {
                         this.client = None;
                         this.history_requests.clear();
                         this.scan_error = Some(match error.kind.as_str() {
-                            "svn_unavailable" | "svn_version" => {
-                                svn_install_hint().to_string()
-                            }
+                            "svn_unavailable" => svn_install_hint().to_string(),
                             _ => error.message,
                         });
                     }

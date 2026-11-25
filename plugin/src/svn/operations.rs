@@ -157,7 +157,7 @@ fn with_message(
     value: &str,
     argument_file: &mut Option<tempfile::NamedTempFile>,
 ) -> Result<Vec<OsString>> {
-    if cfg!(windows) && !value.is_ascii() {
+    if cfg!(windows) {
         use std::io::Write as _;
         // Windows SVN decodes command-line arguments through the system code page.
         let mut file = tempfile::NamedTempFile::new()?;
@@ -256,6 +256,113 @@ fn ensure_file_external_excluded(
         }
     }
     Ok(())
+}
+
+fn ensure_new_move_path(path: &Path) -> Result<()> {
+    match path.symlink_metadata() {
+        Ok(_) => Err(invalid("Choose a new path within this working copy.")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn is_case_only_move(source: &Path, destination: &Path) -> Result<bool> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
+    let (Some(parent), Some(source_name), Some(destination_name)) =
+        (source.parent(), source.file_name(), destination.file_name())
+    else {
+        return Ok(false);
+    };
+    if destination.parent() != Some(parent) || source_name == destination_name {
+        return Ok(false);
+    }
+    let source_wide = source_name.encode_wide().collect::<Vec<_>>();
+    let destination_wide = destination_name.encode_wide().collect::<Vec<_>>();
+    let comparison = unsafe {
+        CompareStringOrdinal(
+            source_wide.as_ptr(),
+            source_wide.len() as i32,
+            destination_wide.as_ptr(),
+            destination_wide.len() as i32,
+            1,
+        )
+    };
+    if comparison == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if comparison != CSTR_EQUAL {
+        return Ok(false);
+    }
+    let mut found_source = false;
+    for entry in fs::read_dir(parent)? {
+        let name = entry?.file_name();
+        if name == destination_name {
+            return Ok(false);
+        }
+        found_source |= name == source_name;
+    }
+    Ok(found_source)
+}
+
+#[cfg(windows)]
+fn move_with_new_case(
+    copy: &WorkingCopy,
+    source: &Path,
+    destination: &Path,
+    cancellation: &Cancellation,
+) -> Result<Value> {
+    ensure_file_external_excluded(copy, &[peg(source)], cancellation)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| invalid("Choose a new path within this working copy."))?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".wu-svn-move-")
+        .tempfile_in(parent)?;
+    let intermediate = temporary.path().to_path_buf();
+    temporary.close()?;
+    cancellation.check()?;
+
+    // Keep the working-copy lock and complete the two moves even if the request is cancelled.
+    let finish = Cancellation::default();
+    let move_path = |from: &Path, to: &Path| {
+        ensure_new_move_path(to)?;
+        command(
+            Some(&copy.root),
+            flags(&["move"]),
+            vec![peg(from), literal_local_target(to)],
+            &Auth::default(),
+            None,
+            &finish,
+        )
+    };
+    let move_result =
+        move_path(source, &intermediate).and_then(|_| move_path(&intermediate, destination));
+    match move_result {
+        Ok(content) => Ok(json!({"text":content,"warning":null})),
+        Err(error) => {
+            let recovery = match intermediate.symlink_metadata() {
+                Ok(_) => move_path(&intermediate, source),
+                Err(recovery) if recovery.kind() == io::ErrorKind::NotFound => return Err(error),
+                Err(recovery) => Err(recovery.into()),
+            };
+            match recovery {
+                Ok(_) => Err(error),
+                Err(recovery) => Err(RpcError::new(
+                    "uncertain",
+                    format!(
+                        "{} Could not restore {} from {}: {} Refresh and verify the working copy.",
+                        error.message,
+                        source.display(),
+                        intermediate.display(),
+                        recovery.message,
+                    ),
+                )),
+            }
+        }
+    }
 }
 
 fn check_write_authentication(
@@ -418,9 +525,14 @@ pub(super) fn run(params: Write, cancellation: &Cancellation) -> Result<Value> {
         Operation::Move { path, destination } => {
             let source = file_target(&copy.root, &path)?;
             let destination = file_target(&copy.root, &destination)?;
-            if source == copy.root || destination == copy.root || destination.exists() {
+            if source == copy.root || destination == copy.root || source == destination {
                 return Err(invalid("Choose a new path within this working copy."));
             }
+            #[cfg(windows)]
+            if is_case_only_move(&source, &destination)? {
+                return move_with_new_case(&copy, &source, &destination, cancellation);
+            }
+            ensure_new_move_path(&destination)?;
             (
                 flags(&["move"]),
                 vec![peg(source), literal_local_target(destination)],

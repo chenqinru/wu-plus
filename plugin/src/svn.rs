@@ -270,17 +270,35 @@ fn command(
             args.push("--password-from-stdin".into());
         }
     }
+    #[cfg(windows)]
+    let (targets, target_file) = {
+        let supports_targets = matches!(
+            args.first().and_then(|argument| argument.to_str()),
+            Some("add" | "delete" | "revert" | "commit" | "lock" | "unlock" | "changelist")
+        );
+        if supports_targets && !targets.is_empty() {
+            let mut file = tempfile::NamedTempFile::new()?;
+            process::write_target_list(&targets, file.as_file_mut(), cancellation)?;
+            args.extend(["--targets".into(), file.path().as_os_str().into()]);
+            (Vec::new(), Some(file))
+        } else {
+            (targets, None)
+        }
+    };
     if !targets.is_empty() {
         args.push("--".into());
         args.extend(targets);
     }
-    process::run(
+    let output = process::run(
         cwd,
         &args,
         password.as_deref(),
         Duration::from_secs(300),
         cancellation,
-    )
+    );
+    #[cfg(windows)]
+    drop(target_file);
+    output
 }
 
 fn flags(args: &[&str]) -> Vec<OsString> {
@@ -421,29 +439,8 @@ pub fn handle(method: &str, params: Value, cancellation: &Cancellation) -> Resul
     cancellation.check()?;
     match method {
         "initialize" => {
-            let version = process::run(
-                None,
-                &flags(&["--version", "--quiet"]),
-                None,
-                Duration::from_secs(5),
-                cancellation,
-            )?;
-            let mut fields = version.trim().split('.');
-            let major = fields
-                .next()
-                .and_then(|field| field.parse::<u32>().ok())
-                .unwrap_or(0);
-            let minor = fields
-                .next()
-                .and_then(|field| field.parse::<u32>().ok())
-                .unwrap_or(0);
-            if (major, minor) < (1, 14) {
-                return Err(RpcError::new(
-                    "svn_version",
-                    "Subversion requires SVN 1.14 or newer.",
-                ));
-            }
-            Ok(json!({"protocol_version": PROTOCOL_VERSION, "svn_version": version.trim()}))
+            let version = process::version(cancellation)?;
+            Ok(json!({"protocol_version": PROTOCOL_VERSION, "svn_version": version}))
         }
         "discover" => read::discover(decode(params)?, cancellation),
         "status" => read::status(decode(params)?, cancellation),

@@ -669,6 +669,121 @@ fn provider_handshake_and_cancellation_use_stdio() {
     assert!(child.wait().unwrap().success());
 }
 
+#[cfg(windows)]
+#[test]
+fn large_windows_commit_keeps_case_only_move_history() {
+    let fixture = Repos::new();
+    let root = &fixture.a;
+    root_request(
+        "write",
+        root,
+        json!({"operation":"move","path":"text.txt","destination":"Text.TXT"}),
+    );
+    let moved = entries(root);
+    assert!(
+        moved
+            .iter()
+            .any(|entry| { entry["path"] == "Text.TXT" && entry["moved_from"] == "text.txt" })
+    );
+    let mut paths = (0..380)
+        .map(|index| format!("file {index:04} {} @.txt", "long ".repeat(20)))
+        .collect::<Vec<_>>();
+    assert!(paths.iter().map(|path| path.len()).sum::<usize>() > 32767);
+    for path in &paths {
+        fs::write(root.join(path), "added\n").unwrap();
+    }
+    root_request("write", root, json!({"operation":"add","paths":paths}));
+    paths.extend(["text.txt".to_owned(), "Text.TXT".to_owned()]);
+    root_request(
+        "write",
+        root,
+        json!({"operation":"commit","paths":paths,"message":"case-only move and batch"}),
+    );
+    assert!(entries(root).is_empty());
+    let history = root_request("read", root, json!({"operation":"history","path":"."}));
+    assert_eq!(history["revisions"][0]["revision"], 3);
+    let log = svn(
+        root,
+        &["log", "-v", "-r", "3", &format!("{}/trunk", fixture.url)],
+    );
+    assert!(
+        log.contains("A /trunk/Text.TXT (from /trunk/text.txt:2)"),
+        "{log}"
+    );
+    assert!(log.contains("D /trunk/text.txt"), "{log}");
+}
+
+#[cfg(windows)]
+#[test]
+fn installed_provider_supports_unicode_working_copy_and_temp_paths() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let Some(executable) = std::env::var_os("WU_PLUS_VERIFY_PROVIDER") else {
+        return;
+    };
+    let fixture = Repos::new();
+    let root = fixture.tmp.path().join("中文工作副本 @");
+    let temp = fixture.tmp.path().join("中文临时目录");
+    fs::create_dir(&temp).unwrap();
+    let mut provider = Command::new(executable)
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = provider.stdin.take().unwrap();
+    let mut output = BufReader::new(provider.stdout.take().unwrap());
+    let mut id = 0;
+    let mut rpc = |method: &str, params: Value| {
+        id += 1;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        let mut reply = String::new();
+        output.read_line(&mut reply).unwrap();
+        let response: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(response["id"], id);
+        assert!(response["error"].is_null(), "{method}: {response}");
+        response["result"].clone()
+    };
+
+    rpc("initialize", json!({}));
+    rpc(
+        "write",
+        json!({"operation":"checkout","url":format!("{}/trunk",fixture.url),"destination":root}),
+    );
+    let path = "中文文件 @.txt";
+    fs::write(root.join(path), "unicode working copy\n").unwrap();
+    rpc(
+        "write",
+        json!({"operation":"add","root":root,"paths":[path]}),
+    );
+    rpc(
+        "write",
+        json!({"operation":"set_property","root":root,"path":path,"name":"wu:note","value":"属性内容"}),
+    );
+    rpc(
+        "write",
+        json!({"operation":"commit","root":root,"paths":[path],"message":"中文提交说明"}),
+    );
+    let history = rpc(
+        "read",
+        json!({"operation":"history","root":root,"path":path}),
+    );
+    assert_eq!(history["revisions"][0]["message"], "中文提交说明");
+    let entry = rpc(
+        "read",
+        json!({"operation":"editor_base","root":root,"path":path}),
+    );
+    assert_eq!(entry["base"], "unicode working copy\n");
+    drop(input);
+    assert!(provider.wait().unwrap().success());
+}
+
 #[test]
 fn svnserve_authentication_failure_and_password_stdin() {
     let fixture = Repos::new();

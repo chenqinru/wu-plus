@@ -93,6 +93,57 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
+function BundleSubversion {
+    $package, $checksum = switch ($Architecture) {
+        'x86_64' { 'Slik-Subversion-1.14.5-x64', '77D4FE02999DDA3BDC3A20E86243AE6EDE99AAF072B4C12B0CDEDB54D88E954A' }
+        'aarch64' { 'Slik-Subversion-1.14.5-ARM64', 'A912BFF8358BBDE801E1CF4B0B32B80A977BC0B3A5E06E1BC726DE05D0E600B6' }
+    }
+    $staging = Join-Path $innoDir 'svn-staging'
+    New-Item -Path $staging -ItemType Directory | Out-Null
+    try {
+        $archive = Join-Path $staging "$package.zip"
+        Invoke-WebRequest -Uri "https://sliksvn.com/assets/uploads/2026/03/$package.zip" -OutFile $archive
+        if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $checksum) {
+            throw "Subversion archive checksum mismatch for $package"
+        }
+        Expand-Archive -LiteralPath $archive -DestinationPath $staging
+        $msi = Join-Path $staging "$package.msi"
+        $extractorArchive = Join-Path $staging 'lessmsi.zip'
+        Invoke-WebRequest -Uri 'https://github.com/activescott/lessmsi/releases/download/v2.12.9/lessmsi-v2.12.9.zip' -OutFile $extractorArchive
+        if ((Get-FileHash $extractorArchive -Algorithm SHA256).Hash -ne '5B4E187E74B184AD3A63CCF06C3D17DAE2B8C4B6C298A996DBD51A9F6DB29D21') {
+            throw 'lessmsi archive checksum mismatch'
+        }
+        $extractor = Join-Path $staging 'lessmsi'
+        Expand-Archive -LiteralPath $extractorArchive -DestinationPath $extractor
+        $extracted = Join-Path $staging 'extracted'
+        & "$extractor\lessmsi.exe" x $msi "$extracted\"
+
+        $client = @(Get-ChildItem -LiteralPath $extracted -Filter svn.exe -File -Recurse)
+        if ($client.Count -ne 1) {
+            throw "Expected one svn.exe in the Subversion package"
+        }
+        $bin = $client[0].Directory.FullName
+        $destination = Join-Path $innoDir 'subversion'
+        New-Item -Path $destination -ItemType Directory | Out-Null
+        Copy-Item -LiteralPath $client[0].FullName -Destination $destination
+        Copy-Item -Path "$bin\SlikSvn-*.dll" -Destination $destination
+        foreach ($runtime in Get-ChildItem -LiteralPath $bin -Directory -Filter 'System*') {
+            Copy-Item -Path "$($runtime.FullName)\*.dll" -Destination $destination
+        }
+        if (Test-Path "$bin\engines") {
+            Copy-Item -LiteralPath "$bin\engines" -Destination $destination -Recurse
+        }
+        Copy-Item -LiteralPath (Join-Path (Split-Path $bin) 'Licenses') -Destination $destination -Recurse
+        Copy-Item -LiteralPath "$PSScriptRoot\windows-svn-sources.txt" -Destination "$destination\Licenses\Sources.txt"
+
+        $svn = Join-Path $destination 'svn.exe'
+        # Opt in inside svn.exe, where SVN converts its Windows command line to the active code page.
+        & mt.exe -nologo "-inputresource:$svn;#1" -manifest "$PSScriptRoot\windows-svn-utf8.manifest" "-outputresource:$svn;#1"
+    } finally {
+        Remove-Item -LiteralPath $staging -Recurse -Force
+    }
+}
+
 function BuildWuAndItsFriends {
     Write-Output "Building Wu and its friends, for channel: $channel"
     cargo --config .cargo/bundle-config.toml build --release --package wu --package cli --package auto_update_helper --target $target
@@ -268,6 +319,7 @@ function BuildInstaller {
 Push-Location $workspace
 PrepareForBundle
 GenerateLicenses
+BundleSubversion
 BuildWuAndItsFriends
 if (-not $AppOnly) {
     BuildRemoteServer
